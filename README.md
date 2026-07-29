@@ -168,6 +168,8 @@ only when replacing the complete destination is intended.
 ScopeWriter carries its C and C++ dependencies under `third_party` and builds
 only the static components it uses. ScopeWriter contains its Zarr V3 filesystem
 writer source and does not require acquire-zarr to be installed.
+The public `libTiffVersion()` and `zlibVersion()` functions report the bundled
+storage dependency versions used by the library.
 
 | Component | Use | License |
 | --- | --- | --- |

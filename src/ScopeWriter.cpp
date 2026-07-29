@@ -3,6 +3,7 @@
 #include "ZarrWriter.h"
 
 #include <tiffio.h>
+#include <zlib.h>
 
 #include <algorithm>
 #include <array>
@@ -26,6 +27,23 @@
 
 namespace scopewriter
 {
+    std::string libTiffVersion()
+    {
+        std::string version = TIFFGetVersion();
+        version = version.substr(0, version.find('\n'));
+        constexpr char prefix[] = "LIBTIFF, Version ";
+        if (version.starts_with(prefix))
+        {
+            version.erase(0, sizeof(prefix) - 1);
+        }
+        return version;
+    }
+
+    std::string zlibVersion()
+    {
+        return ::zlibVersion();
+    }
+
     namespace
     {
         std::string number(double value)

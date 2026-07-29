@@ -34,6 +34,12 @@ namespace
             / ("scopewriter-tests-" + std::to_string(suffix));
     }
 
+    void testDependencyVersions()
+    {
+        require(!scopewriter::libTiffVersion().empty(), "libtiff version is empty");
+        require(!scopewriter::zlibVersion().empty(), "zlib version is empty");
+    }
+
     TIFF* openTiff(const std::filesystem::path& path)
     {
 #if defined(_WIN32)
@@ -936,6 +942,7 @@ int main(int argc, char** argv)
     {
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root);
+        testDependencyVersions();
         testOmeTiff(root);
         testOmeZarr(root);
         testOmeZarrMultiChunkShard(root);

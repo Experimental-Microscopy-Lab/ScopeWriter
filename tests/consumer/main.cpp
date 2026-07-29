@@ -7,7 +7,9 @@
 
 int main(int argc, char** argv)
 {
-    if (argc != 2)
+    if (argc != 2
+        || scopewriter::libTiffVersion().empty()
+        || scopewriter::zlibVersion().empty())
     {
         return 2;
     }

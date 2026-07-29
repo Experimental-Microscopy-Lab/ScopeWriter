@@ -112,7 +112,7 @@ target_include_directories(ScopeWriter
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-target_link_libraries(ScopeWriter PRIVATE TIFF::tiff)
+target_link_libraries(ScopeWriter PRIVATE TIFF::tiff ZLIB::ZLIB)
 target_link_libraries(ScopeWriter PRIVATE ${_scopewriter_zarr_libraries})
 
 if (MSVC)

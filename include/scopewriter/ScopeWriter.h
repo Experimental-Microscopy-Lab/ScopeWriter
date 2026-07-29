@@ -19,6 +19,9 @@ namespace scopewriter
         "pixel_format,pixel_format_id,payload_bytes,source_roi_x,source_roi_y,"
         "source_roi_width,source_roi_height";
 
+    SCOPEWRITER_API std::string libTiffVersion();
+    SCOPEWRITER_API std::string zlibVersion();
+
     enum class Format
     {
         OmeTiff,
