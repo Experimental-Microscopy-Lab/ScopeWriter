@@ -1,10 +1,20 @@
 # ScopeWriter
 
+[![Compile Check](https://github.com/Experimental-Microscopy-Lab/ScopeWriter/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/Experimental-Microscopy-Lab/ScopeWriter/actions/workflows/windows-ci.yml)
+
 ScopeWriter is a reusable C++20 streaming storage library for microscopy frames.
 It is an independent CMake package and has no source-level dependency on
 ScopeOne. Applications provide frame buffers and metadata through the public
 `scopewriter` API; ScopeWriter owns format encoding, compression, streaming,
 finalization and format-specific sidecars.
+
+## Project status
+
+ScopeWriter is in an early stage of development. Its public APIs, metadata
+model and internal architecture are not yet stable and may change without
+backward compatibility. We are actively validating the library across
+microscopy formats and acquisition workloads, and refining its design to make
+it general-purpose, reliable and stable before declaring a stable release.
 
 ## Formats
 
