@@ -1,3 +1,5 @@
+// Implements the public writer and its TIFF and binary backends
+
 #include "scopewriter/ScopeWriter.h"
 
 #include "ZarrWriter.h"
@@ -11,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <ctime>
 #include <deque>
 #include <exception>
@@ -27,6 +30,7 @@
 
 namespace scopewriter
 {
+    // Return the bundled libtiff version
     std::string libTiffVersion()
     {
         std::string version = TIFFGetVersion();
@@ -39,6 +43,7 @@ namespace scopewriter
         return version;
     }
 
+    // Return the bundled zlib version
     std::string zlibVersion()
     {
         return ::zlibVersion();
@@ -350,6 +355,7 @@ namespace scopewriter
             return root / name.str();
         }
 
+        // Validate shared settings before selecting a backend
         bool validSettings(const WriterSettings& settings, std::string& error)
         {
             if (settings.outputPath.empty())
@@ -374,6 +380,16 @@ namespace scopewriter
                 error = "Image dimensions must be positive";
                 return false;
             }
+            const auto width = static_cast<std::size_t>(settings.width);
+            const auto height = static_cast<std::size_t>(settings.height);
+            const std::size_t sampleBytes = bytesPerPixel(settings.pixelType);
+            if (width > (std::numeric_limits<std::size_t>::max)() / height
+                || width * height > (std::numeric_limits<std::size_t>::max)() / sampleBytes)
+            {
+                error = "Image dimensions exceed the supported frame size";
+                return false;
+            }
+            const std::size_t frameBytes = width * height * sampleBytes;
             const int bits = storageBits(settings.pixelType);
             if (settings.significantBits <= 0 || settings.significantBits > bits)
             {
@@ -509,6 +525,20 @@ namespace scopewriter
                 error = "OME-Zarr chunk and shard dimensions are invalid";
                 return false;
             }
+            if (settings.format == Format::OmeZarr
+                && settings.zarrMaxQueuedFrameBytes > 0
+                && settings.zarrMaxQueuedFrameBytes < frameBytes)
+            {
+                error = "OME-Zarr queued frame byte limit is smaller than one frame";
+                return false;
+            }
+            if (settings.format == Format::OmeZarr
+                && settings.zarrWorkerCount
+                    > (std::max)(1u, std::thread::hardware_concurrency()))
+            {
+                error = "OME-Zarr worker count exceeds the available hardware threads";
+                return false;
+            }
             std::int64_t capacity = 0;
             if (!planeCapacity(settings, capacity))
             {
@@ -518,6 +548,7 @@ namespace scopewriter
             return true;
         }
 
+        // Validate frame coordinates and metadata
         bool validFrame(const WriterSettings& settings,
                         const void* data,
                         std::size_t byteCount,
@@ -563,6 +594,78 @@ namespace scopewriter
             return true;
         }
 
+        std::uint32_t tiffRowsPerStrip(const WriterSettings& settings)
+        {
+            constexpr std::size_t targetBytes = 64u * 1024u;
+            const std::size_t rowBytes = static_cast<std::size_t>(settings.width)
+                * bytesPerPixel(settings.pixelType);
+            const std::size_t rows = (std::clamp)(
+                targetBytes / rowBytes,
+                std::size_t{1},
+                static_cast<std::size_t>(settings.height));
+            return static_cast<std::uint32_t>(rows);
+        }
+
+        // Configure one TIFF image directory
+        void configureTiffDirectory(TIFF* tiff,
+                                    const WriterSettings& settings,
+                                    const char* description)
+        {
+            TIFFSetField(tiff, TIFFTAG_IMAGEWIDTH, settings.width);
+            TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, settings.height);
+            TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, storageBits(settings.pixelType));
+            TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, 1);
+            TIFFSetField(tiff, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_UINT);
+            TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
+            TIFFSetField(tiff, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+            TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            TIFFSetField(tiff, TIFFTAG_ROWSPERSTRIP, tiffRowsPerStrip(settings));
+            if (description != nullptr)
+            {
+                TIFFSetField(tiff, TIFFTAG_IMAGEDESCRIPTION, description);
+            }
+            if (settings.enableCompression)
+            {
+                TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_ADOBE_DEFLATE);
+                TIFFSetField(tiff, TIFFTAG_ZIPQUALITY, settings.compressionLevel);
+                TIFFSetField(tiff, TIFFTAG_PREDICTOR, PREDICTOR_HORIZONTAL);
+            }
+            else
+            {
+                TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
+            }
+        }
+
+        // Write one image using bounded TIFF strips
+        bool writeTiffStrips(TIFF* tiff,
+                             const WriterSettings& settings,
+                             const void* data,
+                             std::string& error)
+        {
+            const std::size_t rowBytes = static_cast<std::size_t>(settings.width)
+                * bytesPerPixel(settings.pixelType);
+            const std::size_t rowsPerStrip = tiffRowsPerStrip(settings);
+            const auto* bytes = static_cast<const std::uint8_t*>(data);
+            tstrip_t strip = 0;
+            for (std::size_t row = 0; row < static_cast<std::size_t>(settings.height);
+                 row += rowsPerStrip, ++strip)
+            {
+                const std::size_t rows = (std::min)(
+                    rowsPerStrip,
+                    static_cast<std::size_t>(settings.height) - row);
+                if (TIFFWriteEncodedStrip(tiff,
+                                          strip,
+                                          const_cast<std::uint8_t*>(bytes + row * rowBytes),
+                                          static_cast<tmsize_t>(rows * rowBytes)) == -1)
+                {
+                    error = "Failed to write a TIFF strip";
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Validate binary frame layout before writing
         bool validBinaryFrame(const WriterSettings& settings,
                               const void* data,
                               std::size_t byteCount,
@@ -596,6 +699,7 @@ namespace scopewriter
             const std::vector<Plane>* planes{nullptr};
         };
 
+        // Build OME XML for the current set of planes
         std::string buildOmeXml(const WriterSettings& settings,
                                 const std::vector<TiffFileMetadata>& files,
                                 const std::string& rootUuid)
@@ -633,6 +737,7 @@ namespace scopewriter
                 || !settings.detector.model.empty()
                 || !settings.detector.serialNumber.empty()
                 || settings.detector.offset.has_value();
+            const bool hasLinkedMetadata = !settings.linkedMetadataFile.empty();
             const std::string acquisitionDate = isoTimestamp(
                 settings.acquisitionStartTimestampNs);
 
@@ -814,7 +919,17 @@ namespace scopewriter
                             << "\"/>\n      </Plane>\n";
                     }
                 }
-                xml << "    </Pixels>\n  </Image>\n";
+                xml << "    </Pixels>\n";
+                for (std::size_t annotationIndex = 0;
+                     annotationIndex < settings.metadata.size();
+                     ++annotationIndex)
+                {
+                    xml << "    <AnnotationRef ID=\"Annotation:Global:"
+                        << annotationIndex << "\"/>\n";
+                }
+                if (hasLinkedMetadata)
+                    xml << "    <AnnotationRef ID=\"Annotation:LinkedMetadata\"/>\n";
+                xml << "  </Image>\n";
             }
             const bool hasFrameAnnotations = std::any_of(
                 series.begin(), series.end(), [](const Series& current)
@@ -825,7 +940,7 @@ namespace scopewriter
                             return !plane->metadata.metadata.empty();
                         });
                 });
-            if (!settings.metadata.empty() || hasFrameAnnotations)
+            if (!settings.metadata.empty() || hasLinkedMetadata || hasFrameAnnotations)
             {
                 xml << "  <StructuredAnnotations>\n";
                 std::size_t annotationIndex = 0;
@@ -840,6 +955,15 @@ namespace scopewriter
                             << xmlEscape(value) << "</M>";
                     }
                     xml << "</Value></MapAnnotation>\n";
+                }
+                if (hasLinkedMetadata)
+                {
+                    xml << "    <MapAnnotation ID=\"Annotation:LinkedMetadata\""
+                        << " Namespace=\"urn:scopewriter:linked-metadata\"><Value>"
+                        << "<M K=\"fileName\">"
+                        << xmlEscape(settings.linkedMetadataFile)
+                        << "</M><M K=\"format\">json</M>"
+                        << "</Value></MapAnnotation>\n";
                 }
                 for (const auto& current : series)
                 {
@@ -864,6 +988,7 @@ namespace scopewriter
             return xml.str();
         }
 
+        // Define the common backend lifecycle
         class Backend
         {
         public:
@@ -873,10 +998,12 @@ namespace scopewriter
                                 std::size_t byteCount,
                                 const FrameMetadata& metadata,
                                 std::string& error) = 0;
+            virtual bool flush(std::string& error) = 0;
             virtual bool close(std::string& error) = 0;
             virtual bool isOpen() const noexcept = 0;
         };
 
+        // Store plain TIFF frames and embedded metadata
         class TiffBackend final : public Backend
         {
         public:
@@ -963,34 +1090,30 @@ namespace scopewriter
                     << '}';
 
                 TIFFCreateDirectory(m_tiff);
-                TIFFSetField(m_tiff, TIFFTAG_IMAGEWIDTH, m_settings.width);
-                TIFFSetField(m_tiff, TIFFTAG_IMAGELENGTH, m_settings.height);
-                TIFFSetField(m_tiff, TIFFTAG_BITSPERSAMPLE, storageBits(m_settings.pixelType));
-                TIFFSetField(m_tiff, TIFFTAG_SAMPLESPERPIXEL, 1);
-                TIFFSetField(m_tiff, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_UINT);
-                TIFFSetField(m_tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
-                TIFFSetField(m_tiff, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
-                TIFFSetField(m_tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
-                TIFFSetField(m_tiff, TIFFTAG_ROWSPERSTRIP, m_settings.height);
-                TIFFSetField(m_tiff, TIFFTAG_IMAGEDESCRIPTION, description.str().c_str());
-                if (m_settings.enableCompression)
-                {
-                    TIFFSetField(m_tiff, TIFFTAG_COMPRESSION, COMPRESSION_ADOBE_DEFLATE);
-                    TIFFSetField(m_tiff, TIFFTAG_ZIPQUALITY, m_settings.compressionLevel);
-                    TIFFSetField(m_tiff, TIFFTAG_PREDICTOR, PREDICTOR_HORIZONTAL);
-                }
-                else
-                {
-                    TIFFSetField(m_tiff, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
-                }
-                if (TIFFWriteEncodedStrip(m_tiff, 0, const_cast<void*>(data),
-                                          static_cast<tmsize_t>(byteCount)) == -1
+                const std::string descriptionText = description.str();
+                configureTiffDirectory(m_tiff, m_settings, descriptionText.c_str());
+                if (!writeTiffStrips(m_tiff, m_settings, data, error)
                     || !TIFFWriteDirectory(m_tiff))
                 {
-                    error = "Failed to write the TIFF frame";
+                    if (error.empty()) error = "Failed to write the TIFF frame";
                     return false;
                 }
                 ++m_framesWritten;
+                return true;
+            }
+
+            bool flush(std::string& error) override
+            {
+                if (m_tiff == nullptr)
+                {
+                    error = "TIFF output is not open";
+                    return false;
+                }
+                if (!TIFFFlush(m_tiff))
+                {
+                    error = "Failed to flush the TIFF output";
+                    return false;
+                }
                 return true;
             }
 
@@ -1019,6 +1142,7 @@ namespace scopewriter
             std::size_t m_framesWritten{0};
         };
 
+        // Store raw frame bytes with CSV metadata
         class BinaryBackend final : public Backend
         {
         public:
@@ -1129,6 +1253,23 @@ namespace scopewriter
                 return true;
             }
 
+            bool flush(std::string& error) override
+            {
+                if (!m_raw.is_open() || !m_metadata.is_open())
+                {
+                    error = "Binary output is not open";
+                    return false;
+                }
+                m_raw.flush();
+                m_metadata.flush();
+                if (!m_raw || !m_metadata)
+                {
+                    error = "Failed to flush the binary output";
+                    return false;
+                }
+                return true;
+            }
+
             bool close(std::string& error) override
             {
                 bool success = true;
@@ -1166,6 +1307,7 @@ namespace scopewriter
             std::size_t m_framesWritten{0};
         };
 
+        // Store asynchronous OME TIFF series
         class OmeTiffBackend final : public Backend
         {
         public:
@@ -1246,6 +1388,8 @@ namespace scopewriter
                                        * bytesPerPixel(settings.pixelType),
                                    0);
                 m_jobs.clear();
+                m_freeFrames.clear();
+                m_activeJobs = 0;
                 m_workerError.clear();
                 m_accepting = true;
                 m_open = true;
@@ -1329,6 +1473,27 @@ namespace scopewriter
                 return true;
             }
 
+            bool flush(std::string& error) override
+            {
+                if (!m_open)
+                {
+                    error = "OME-TIFF output is not open";
+                    return false;
+                }
+                if (!waitForQueuedWrites(error))
+                {
+                    return false;
+                }
+                for (auto& series : m_series)
+                {
+                    if (!checkpointSeries(series, true, error))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
             bool close(std::string& error) override
             {
                 if (!m_open)
@@ -1353,18 +1518,14 @@ namespace scopewriter
                 }
                 for (auto& series : m_series)
                 {
-                    if (!series.planes.empty())
+                    std::string checkpointError;
+                    if (!checkpointSeries(series, false, checkpointError))
                     {
-                        const std::string xml = buildMetadata(series);
-                        if (!TIFFSetDirectory(series.tiff, 0)
-                            || !TIFFSetField(series.tiff,
-                                             TIFFTAG_IMAGEDESCRIPTION,
-                                             xml.c_str())
-                            || !TIFFRewriteDirectory(series.tiff))
+                        if (error.empty())
                         {
-                            error = "Failed to finalize the OME-XML metadata";
-                            success = false;
+                            error = std::move(checkpointError);
                         }
+                        success = false;
                     }
                 }
                 std::vector<std::filesystem::path> emptyFiles;
@@ -1403,6 +1564,7 @@ namespace scopewriter
                 }
                 m_nextPlaneIndex.clear();
                 m_zeroFrame.clear();
+                m_freeFrames.clear();
                 m_open = false;
                 return success;
             }
@@ -1419,6 +1581,7 @@ namespace scopewriter
                 std::string uuid;
                 TIFF* tiff{nullptr};
                 std::vector<Plane> planes;
+                std::size_t checkpointedPlanes{0};
             };
 
             struct Job
@@ -1427,6 +1590,76 @@ namespace scopewriter
                 FrameMetadata metadata;
                 bool zeroFill{false};
             };
+
+            TIFF* openSeries(const std::filesystem::path& path, const char* mode) const
+            {
+#if defined(_WIN32)
+                return TIFFOpenW(path.c_str(), mode);
+#else
+                const std::string pathString = pathUtf8(path);
+                return TIFFOpen(pathString.c_str(), mode);
+#endif
+            }
+
+            bool waitForQueuedWrites(std::string& error)
+            {
+                std::unique_lock lock(m_queueMutex);
+                m_queueDrained.wait(lock, [this]
+                {
+                    return !m_workerError.empty()
+                        || (m_jobs.empty() && m_activeJobs == 0);
+                });
+                if (!m_workerError.empty())
+                {
+                    error = m_workerError;
+                    return false;
+                }
+                return true;
+            }
+
+            bool checkpointSeries(TiffSeries& series,
+                                  bool reopen,
+                                  std::string& error)
+            {
+                if (series.tiff == nullptr)
+                {
+                    error = "OME-TIFF output is not open";
+                    return false;
+                }
+                const bool metadataChanged = series.planes.size() != series.checkpointedPlanes;
+                if (metadataChanged)
+                {
+                    const std::string xml = buildMetadata(series);
+                    if (!TIFFSetDirectory(series.tiff, 0)
+                        || !TIFFSetField(series.tiff, TIFFTAG_IMAGEDESCRIPTION, xml.c_str())
+                        || !TIFFRewriteDirectory(series.tiff))
+                    {
+                        error = "Failed to checkpoint the OME-XML metadata";
+                        return false;
+                    }
+                }
+                if (!TIFFFlush(series.tiff))
+                {
+                    error = "Failed to flush the OME-TIFF output";
+                    return false;
+                }
+                if (metadataChanged)
+                {
+                    series.checkpointedPlanes = series.planes.size();
+                }
+                if (!reopen || !metadataChanged)
+                {
+                    return true;
+                }
+                TIFFClose(series.tiff);
+                series.tiff = openSeries(series.path, "a8");
+                if (series.tiff == nullptr)
+                {
+                    error = "Failed to reopen the OME-TIFF output after checkpoint";
+                    return false;
+                }
+                return true;
+            }
 
             void closeSeries()
             {
@@ -1473,8 +1706,16 @@ namespace scopewriter
                 job.zeroFill = data == nullptr;
                 if (data != nullptr)
                 {
-                    const auto* bytes = static_cast<const std::uint8_t*>(data);
-                    job.frame.assign(bytes, bytes + byteCount);
+                    {
+                        std::lock_guard lock(m_queueMutex);
+                        if (!m_freeFrames.empty())
+                        {
+                            job.frame = std::move(m_freeFrames.back());
+                            m_freeFrames.pop_back();
+                        }
+                    }
+                    job.frame.resize(byteCount);
+                    std::memcpy(job.frame.data(), data, byteCount);
                 }
 
                 std::unique_lock lock(m_queueMutex);
@@ -1516,57 +1757,52 @@ namespace scopewriter
                         }
                         job = std::move(m_jobs.front());
                         m_jobs.pop_front();
+                        ++m_activeJobs;
                         m_queueSpace.notify_one();
                     }
 
                     std::string error;
                     const void* data = job.zeroFill ? m_zeroFrame.data() : job.frame.data();
-                    const std::size_t byteCount = job.zeroFill
-                        ? m_zeroFrame.size()
-                        : job.frame.size();
-                    if (writePlane(data, byteCount, job.metadata, error))
-                    {
-                        continue;
-                    }
+                    const bool success = writePlane(data, job.metadata, error);
                     {
                         std::lock_guard lock(m_queueMutex);
+                        --m_activeJobs;
+                        if (success)
+                        {
+                            recycleFrame(job.frame);
+                            if (m_jobs.empty() && m_activeJobs == 0)
+                            {
+                                m_queueDrained.notify_all();
+                            }
+                            continue;
+                        }
                         m_workerError = error.empty() ? "OME-TIFF writer failed" : std::move(error);
                         m_accepting = false;
                         m_jobs.clear();
                     }
                     m_jobReady.notify_all();
                     m_queueSpace.notify_all();
+                    m_queueDrained.notify_all();
                     return;
                 }
             }
 
+            void recycleFrame(std::vector<std::uint8_t>& frame)
+            {
+                if (frame.empty() || m_freeFrames.size() >= m_queueCapacity + 1)
+                {
+                    return;
+                }
+                frame.clear();
+                m_freeFrames.push_back(std::move(frame));
+            }
+
             bool writePlane(const void* data,
-                            std::size_t byteCount,
                             const FrameMetadata& metadata,
                             std::string& error)
             {
                 auto& series = m_series[static_cast<std::size_t>(metadata.positionIndex)];
                 TIFF* tiff = series.tiff;
-
-                TIFFSetField(tiff, TIFFTAG_IMAGEWIDTH, m_settings.width);
-                TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, m_settings.height);
-                TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, storageBits(m_settings.pixelType));
-                TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, 1);
-                TIFFSetField(tiff, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_UINT);
-                TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
-                TIFFSetField(tiff, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
-                TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
-                TIFFSetField(tiff, TIFFTAG_ROWSPERSTRIP, m_settings.height);
-                if (m_settings.enableCompression)
-                {
-                    TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_ADOBE_DEFLATE);
-                    TIFFSetField(tiff, TIFFTAG_ZIPQUALITY, m_settings.compressionLevel);
-                    TIFFSetField(tiff, TIFFTAG_PREDICTOR, PREDICTOR_HORIZONTAL);
-                }
-                else
-                {
-                    TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
-                }
 
                 series.planes.push_back(Plane{
                     .ifd = static_cast<int>(series.planes.size()),
@@ -1575,15 +1811,18 @@ namespace scopewriter
                 if (series.planes.size() == 1)
                 {
                     const std::string xml = buildMetadata(series);
-                    TIFFSetField(tiff, TIFFTAG_IMAGEDESCRIPTION, xml.c_str());
+                    configureTiffDirectory(tiff, m_settings, xml.c_str());
+                }
+                else
+                {
+                    configureTiffDirectory(tiff, m_settings, nullptr);
                 }
 
-                if (TIFFWriteEncodedStrip(tiff, 0, const_cast<void*>(data),
-                                          static_cast<tmsize_t>(byteCount)) == -1
+                if (!writeTiffStrips(tiff, m_settings, data, error)
                     || !TIFFWriteDirectory(tiff))
                 {
                     series.planes.pop_back();
-                    error = "Failed to write the OME-TIFF frame";
+                    if (error.empty()) error = "Failed to write the OME-TIFF frame";
                     return false;
                 }
                 return true;
@@ -1594,16 +1833,20 @@ namespace scopewriter
             std::vector<std::int64_t> m_nextPlaneIndex;
             std::vector<std::uint8_t> m_zeroFrame;
             std::deque<Job> m_jobs;
+            std::deque<std::vector<std::uint8_t>> m_freeFrames;
             std::thread m_worker;
             std::mutex m_queueMutex;
             std::condition_variable m_jobReady;
             std::condition_variable m_queueSpace;
+            std::condition_variable m_queueDrained;
             std::string m_workerError;
             std::size_t m_queueCapacity{8};
+            std::size_t m_activeJobs{0};
             bool m_accepting{false};
             bool m_open{false};
         };
 
+        // Store OME Zarr series through the filesystem backend
         class OmeZarrBackend final : public Backend
         {
             struct Series
@@ -1767,6 +2010,26 @@ namespace scopewriter
                 return true;
             }
 
+            bool flush(std::string& error) override
+            {
+                if (!m_open)
+                {
+                    error = "OME-Zarr output is not open";
+                    return false;
+                }
+                for (auto& [position, series] : m_series)
+                {
+                    static_cast<void>(position);
+                    series.frameMetadata.flush();
+                    if (!series.frameMetadata)
+                    {
+                        error = "Failed to flush OME-Zarr frame metadata";
+                        return false;
+                    }
+                }
+                return m_writer.flush(error);
+            }
+
             bool close(std::string& error) override
             {
                 if (!m_open)
@@ -1841,6 +2104,11 @@ namespace scopewriter
                      << ",\"significantBits\":" << m_settings.significantBits
                      << ",\"frameMetadata\":\"scopewriter.frames.jsonl\""
                      << ",\"frameMetadataFormat\":\"json-lines\"";
+                if (!m_settings.linkedMetadataFile.empty())
+                {
+                    json << ",\"linkedMetadataFile\":"
+                         << jsonEscape(m_settings.linkedMetadataFile);
+                }
                 if (m_settings.acquisitionStartTimestampNs != 0)
                 {
                     json << ",\"acquisitionStartTimestampNs\":"
@@ -1982,17 +2250,20 @@ namespace scopewriter
         };
     }
 
+    // Hold the active backend and public error state
     struct Writer::Impl
     {
         std::unique_ptr<Backend> backend;
         std::string error;
     };
 
+    // Create an empty writer
     Writer::Writer()
         : m_impl(std::make_unique<Impl>())
     {
     }
 
+    // Close any active output before destruction
     Writer::~Writer()
     {
         if (m_impl)
@@ -2004,6 +2275,7 @@ namespace scopewriter
     Writer::Writer(Writer&&) noexcept = default;
     Writer& Writer::operator=(Writer&&) noexcept = default;
 
+    // Validate settings and open the selected backend
     bool Writer::open(const WriterSettings& suppliedSettings)
     {
         if (isOpen() && !close())
@@ -2044,6 +2316,7 @@ namespace scopewriter
         return true;
     }
 
+    // Append one frame to the active backend
     bool Writer::append(const void* data,
                         std::size_t byteCount,
                         const FrameMetadata& metadata)
@@ -2057,6 +2330,7 @@ namespace scopewriter
         return m_impl->backend->append(data, byteCount, metadata, m_impl->error);
     }
 
+    // Finalize and close the active backend
     bool Writer::close()
     {
         if (!m_impl || !m_impl->backend)
@@ -2069,11 +2343,28 @@ namespace scopewriter
         return success;
     }
 
+    // Checkpoint pending output without closing it
+    bool Writer::flush()
+    {
+        if (!m_impl || !m_impl->backend)
+        {
+            if (m_impl)
+            {
+                m_impl->error = "ScopeWriter is not open";
+            }
+            return false;
+        }
+        m_impl->error.clear();
+        return m_impl->backend->flush(m_impl->error);
+    }
+
+    // Report whether a backend is active
     bool Writer::isOpen() const noexcept
     {
         return m_impl && m_impl->backend && m_impl->backend->isOpen();
     }
 
+    // Return the most recent writer error
     const std::string& Writer::lastError() const noexcept
     {
         return m_impl->error;

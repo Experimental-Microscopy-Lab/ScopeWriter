@@ -11,6 +11,7 @@
 
 namespace scopewriter::internal::zarr
 {
+    // Allocate a zero filled chunk buffer
     Chunk::Chunk(std::size_t byteCount, std::size_t bytesPerSample)
         : m_bytesPerSample(bytesPerSample), m_buffer(byteCount, 0)
     {
@@ -20,6 +21,7 @@ namespace scopewriter::internal::zarr
         }
     }
 
+    // Copy image rows into this chunk
     void Chunk::writeRows(std::size_t destinationOffset,
                           const std::uint8_t* source,
                           std::size_t sourceStride,
@@ -58,11 +60,13 @@ namespace scopewriter::internal::zarr
         m_hasData.store(anyData, std::memory_order_relaxed);
     }
 
+    // Report whether the chunk contains any nonzero byte
     bool Chunk::hasData() const noexcept
     {
         return m_hasData.load(std::memory_order_relaxed);
     }
 
+    // Finalize byte order and transfer encoded chunk data
     bool Chunk::compressAndTake(bool enableCompression,
                                 int compressionLevel,
                                 std::vector<std::uint8_t>& output,

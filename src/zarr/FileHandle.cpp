@@ -25,6 +25,7 @@ namespace scopewriter::internal::zarr
     namespace
     {
 #if defined(_WIN32)
+        // Format one Windows error code
         std::string windowsError(DWORD code)
         {
             LPSTR buffer = nullptr;
@@ -66,6 +67,7 @@ namespace scopewriter::internal::zarr
 #endif
     }
 
+    // Open one shard file for positioned writes
     FileHandle::FileHandle(const std::filesystem::path& path)
     {
 #if defined(_WIN32)
@@ -93,6 +95,7 @@ namespace scopewriter::internal::zarr
 #endif
     }
 
+    // Close the native file handle
     FileHandle::~FileHandle()
     {
 #if defined(_WIN32)
@@ -109,11 +112,13 @@ namespace scopewriter::internal::zarr
 #endif
     }
 
+    // Return the native file handle
     void* FileHandle::native() const noexcept
     {
         return m_handle;
     }
 
+    // Track one borrowed pooled handle
     BorrowedHandle::BorrowedHandle(FileHandle* handle,
                                    std::filesystem::path path,
                                    FileHandlePool* pool)
@@ -150,6 +155,7 @@ namespace scopewriter::internal::zarr
         return m_handle;
     }
 
+    // Return this handle to its pool
     void BorrowedHandle::release()
     {
         if (m_handle != nullptr && m_pool != nullptr)
@@ -160,6 +166,7 @@ namespace scopewriter::internal::zarr
         m_pool = nullptr;
     }
 
+    // Set a bounded platform handle limit
     FileHandlePool::FileHandlePool()
     {
 #if defined(_WIN32)
@@ -173,6 +180,7 @@ namespace scopewriter::internal::zarr
         m_maxHandles = (std::max)(m_maxHandles, std::size_t{1});
     }
 
+    // Borrow or create one cached file handle
     BorrowedHandle FileHandlePool::borrow(const std::filesystem::path& path)
     {
         std::unique_lock lock(m_mutex);
@@ -225,6 +233,7 @@ namespace scopewriter::internal::zarr
         return {iterator->second.handle.get(), path, this};
     }
 
+    // Release one reference to a cached handle
     void FileHandlePool::giveBack(const std::filesystem::path& path)
     {
         std::lock_guard lock(m_mutex);
@@ -240,6 +249,7 @@ namespace scopewriter::internal::zarr
         m_spaceAvailable.notify_all();
     }
 
+    // Remove one idle handle from the cache
     void FileHandlePool::close(const std::filesystem::path& path)
     {
         std::lock_guard lock(m_mutex);
@@ -252,6 +262,7 @@ namespace scopewriter::internal::zarr
         m_spaceAvailable.notify_all();
     }
 
+    // Evict the least recently used idle handle
     void FileHandlePool::evictIdle()
     {
         for (auto iterator = m_lru.rbegin(); iterator != m_lru.rend(); ++iterator)
@@ -266,6 +277,7 @@ namespace scopewriter::internal::zarr
         }
     }
 
+    // Write a complete byte range at one file offset
     bool writeAt(FileHandle& handle,
                  std::uint64_t offset,
                  const std::uint8_t* data,
@@ -340,6 +352,7 @@ namespace scopewriter::internal::zarr
 #endif
     }
 
+    // Flush one native file handle to storage
     bool flush(FileHandle& handle, std::string& error)
     {
 #if defined(_WIN32)

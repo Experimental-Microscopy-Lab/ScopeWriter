@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -111,12 +112,31 @@ namespace
         return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     }
 
+    std::uint32_t tiffDirectoryCount(const std::filesystem::path& path)
+    {
+        TIFF* tiff = openTiff(path);
+        require(tiff != nullptr, "Failed to open generated TIFF");
+        const std::uint32_t count = TIFFNumberOfDirectories(tiff);
+        TIFFClose(tiff);
+        return count;
+    }
+
+    void requireNoTemporaryMetadata(const std::filesystem::path& root)
+    {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(root))
+        {
+            require(!entry.path().filename().string().ends_with(".scopewriter.tmp"),
+                    "OME-Zarr checkpoint left temporary metadata behind");
+        }
+    }
+
     void testOmeTiff(const std::filesystem::path& root)
     {
         const auto path = root / "output.ome.tiff";
         scopewriter::WriterSettings settings;
         settings.format = scopewriter::Format::OmeTiff;
         settings.outputPath = path;
+        settings.linkedMetadataFile = "output_metadata.json";
         settings.width = 8;
         settings.height = 4;
         settings.pixelType = scopewriter::PixelType::UInt16;
@@ -179,6 +199,27 @@ namespace
                 "DeltaT metadata is incorrect");
         require(xml.find("Camera &amp; channel") != std::string::npos,
                 "OME-XML attributes are not escaped");
+        require(xml.find("<AnnotationRef ID=\"Annotation:LinkedMetadata\"/>")
+                    != std::string::npos
+                    && xml.find("Namespace=\"urn:scopewriter:linked-metadata\"")
+                        != std::string::npos
+                    && xml.find("<M K=\"fileName\">output_metadata.json</M>")
+                        != std::string::npos,
+                "OME-TIFF linked metadata file is missing");
+
+        scopewriter::DatasetFrameLocation location;
+        location.format = scopewriter::Format::OmeTiff;
+        location.dataPath = path;
+        location.frameIndex = 1;
+        scopewriter::DatasetFrame stored;
+        std::string error;
+        require(scopewriter::datasetFrame(location, stored, error), error);
+        require(stored.width == settings.width && stored.height == settings.height
+                    && stored.pixelType == settings.pixelType
+                    && stored.significantBits == settings.significantBits
+                    && stored.bytes.size() == frame.size() * sizeof(std::uint16_t)
+                    && std::memcmp(stored.bytes.data(), frame.data(), stored.bytes.size()) == 0,
+                "OME-TIFF dataset frame is incorrect");
     }
 
     void testOmeZarr(const std::filesystem::path& root)
@@ -187,6 +228,7 @@ namespace
         scopewriter::WriterSettings settings;
         settings.format = scopewriter::Format::OmeZarr;
         settings.outputPath = path;
+        settings.linkedMetadataFile = "output_metadata.json";
         settings.width = 8;
         settings.height = 8;
         settings.pixelType = scopewriter::PixelType::UInt8;
@@ -262,6 +304,9 @@ namespace
                 "OME-NGFF version metadata is missing");
         require(groupMetadata.find("\"scopewriter\"") != std::string::npos,
                 "ScopeWriter dataset metadata is missing");
+        require(groupMetadata.find("\"linkedMetadataFile\":\"output_metadata.json\"")
+                    != std::string::npos,
+                "OME-Zarr linked metadata file is missing");
         const std::string arrayMetadata = readText(path / "0" / "zarr.json");
         require(arrayMetadata.find("\"shape\": [3,1,1,8,8]") != std::string::npos,
                 "OME-Zarr array shape is incorrect");
@@ -272,6 +317,21 @@ namespace
         require(frameMetadata.find("\"t\":\"0\"") != std::string::npos
                     && frameMetadata.find("\"t\":\"2\"") != std::string::npos,
                 "OME-Zarr frame coordinates are missing");
+
+        scopewriter::DatasetFrameLocation location;
+        location.format = scopewriter::Format::OmeZarr;
+        location.dataPath = path / "0";
+        scopewriter::DatasetFrame stored;
+        std::string error;
+        require(scopewriter::datasetFrame(location, stored, error), error);
+        require(stored.bytes == frame, "OME-Zarr dataset frame is incorrect");
+        location.t = 1;
+        require(scopewriter::datasetFrame(location, stored, error), error);
+        require(std::all_of(stored.bytes.begin(), stored.bytes.end(), [](std::uint8_t value)
+                {
+                    return value == 0;
+                }),
+                "OME-Zarr zero-filled dataset frame is incorrect");
     }
 
     void testOmeZarrMultiChunkShard(const std::filesystem::path& root)
@@ -338,6 +398,14 @@ namespace
             require(decoded.front() == expected[chunk],
                     "Multi-chunk OME-Zarr chunk coordinates are incorrect");
         }
+
+        scopewriter::DatasetFrameLocation location;
+        location.format = scopewriter::Format::OmeZarr;
+        location.dataPath = path / "0";
+        scopewriter::DatasetFrame stored;
+        std::string error;
+        require(scopewriter::datasetFrame(location, stored, error), error);
+        require(stored.bytes == frame, "Multi-chunk OME-Zarr dataset frame is incorrect");
     }
 
     void testOmeZarrConfigurableShards(const std::filesystem::path& root)
@@ -390,6 +458,108 @@ namespace
         require(!ZSTD_isError(decodedSize) && decodedSize == decoded.size()
                     && decoded == std::array<std::uint8_t, 4>{7, 0, 0, 0},
                 "Configured OME-Zarr edge shard pixels are incorrect");
+
+        scopewriter::DatasetFrameLocation location;
+        location.format = scopewriter::Format::OmeZarr;
+        location.dataPath = path / "0";
+        scopewriter::DatasetFrame stored;
+        std::string error;
+        require(scopewriter::datasetFrame(location, stored, error), error);
+        require(stored.bytes == frame, "Configured OME-Zarr dataset frame is incorrect");
+    }
+
+    void testCheckpointsAndTiffStrips(const std::filesystem::path& root)
+    {
+        const auto tiffPath = root / "checkpoint.ome.tiff";
+        scopewriter::WriterSettings tiffSettings;
+        tiffSettings.outputPath = tiffPath;
+        tiffSettings.width = 512;
+        tiffSettings.height = 256;
+        tiffSettings.pixelType = scopewriter::PixelType::UInt16;
+        tiffSettings.significantBits = 16;
+        tiffSettings.enableCompression = false;
+        std::vector<std::uint16_t> tiffFrame(
+            static_cast<std::size_t>(tiffSettings.width) * tiffSettings.height,
+            42);
+
+        scopewriter::Writer tiffWriter;
+        require(tiffWriter.open(tiffSettings), tiffWriter.lastError());
+        require(tiffWriter.append(tiffFrame.data(),
+                                  tiffFrame.size() * sizeof(std::uint16_t)),
+                tiffWriter.lastError());
+        require(tiffWriter.flush(), tiffWriter.lastError());
+        require(tiffDirectoryCount(tiffPath) == 1,
+                "OME-TIFF checkpoint did not expose the first directory");
+        {
+            TIFF* tiff = openTiff(tiffPath);
+            require(tiff != nullptr, "Failed to inspect checkpointed OME-TIFF");
+            require(TIFFNumberOfStrips(tiff) > 1,
+                    "OME-TIFF did not use bounded strips");
+            TIFFClose(tiff);
+        }
+        require(readTiffDescription(tiffPath).find("SizeT=\"1\"") != std::string::npos,
+                "OME-TIFF checkpoint shape is incorrect");
+
+        std::fill(tiffFrame.begin(), tiffFrame.end(), 84);
+        require(tiffWriter.append(tiffFrame.data(),
+                                  tiffFrame.size() * sizeof(std::uint16_t)),
+                tiffWriter.lastError());
+        require(tiffWriter.flush(), tiffWriter.lastError());
+        require(tiffDirectoryCount(tiffPath) == 2,
+                "OME-TIFF could not append after a checkpoint");
+        require(readTiffDescription(tiffPath).find("SizeT=\"2\"") != std::string::npos,
+                "OME-TIFF checkpoint did not update its shape");
+        {
+            TIFF* tiff = openTiff(tiffPath);
+            require(tiff != nullptr && TIFFSetDirectory(tiff, 1) == 1,
+                    "Failed to inspect the second checkpointed TIFF directory");
+            std::vector<std::uint16_t> decoded(tiffFrame.size());
+            for (std::uint32_t row = 0; row < static_cast<std::uint32_t>(tiffSettings.height);
+                 ++row)
+            {
+                require(TIFFReadScanline(tiff,
+                                         decoded.data()
+                                             + static_cast<std::size_t>(row) * tiffSettings.width,
+                                         row,
+                                         0) == 1,
+                        "Failed to decode a checkpointed TIFF scanline");
+            }
+            require(decoded == tiffFrame,
+                    "OME-TIFF pixels changed after checkpoint and append");
+            TIFFClose(tiff);
+        }
+        require(tiffWriter.close(), tiffWriter.lastError());
+
+        const auto zarrPath = root / "checkpoint.ome.zarr";
+        scopewriter::WriterSettings zarrSettings;
+        zarrSettings.format = scopewriter::Format::OmeZarr;
+        zarrSettings.outputPath = zarrPath;
+        zarrSettings.width = 16;
+        zarrSettings.height = 16;
+        zarrSettings.pixelType = scopewriter::PixelType::UInt8;
+        zarrSettings.significantBits = 8;
+        zarrSettings.zarrWorkerCount = 1;
+        zarrSettings.zarrMaxQueuedFrameBytes = 256;
+        std::vector<std::uint8_t> zarrFrame(256, 7);
+
+        scopewriter::Writer zarrWriter;
+        require(zarrWriter.open(zarrSettings), zarrWriter.lastError());
+        require(zarrWriter.append(zarrFrame.data(), zarrFrame.size()),
+                zarrWriter.lastError());
+        require(zarrWriter.flush(), zarrWriter.lastError());
+        require(readText(zarrPath / "0" / "zarr.json")
+                    .find("\"shape\": [1,1,1,16,16]") != std::string::npos,
+                "OME-Zarr checkpoint shape is incorrect");
+        requireNoTemporaryMetadata(zarrPath);
+
+        require(zarrWriter.append(zarrFrame.data(), zarrFrame.size()),
+                zarrWriter.lastError());
+        require(zarrWriter.flush(), zarrWriter.lastError());
+        require(readText(zarrPath / "0" / "zarr.json")
+                    .find("\"shape\": [2,1,1,16,16]") != std::string::npos,
+                "OME-Zarr checkpoint did not update its shape");
+        requireNoTemporaryMetadata(zarrPath);
+        require(zarrWriter.close(), zarrWriter.lastError());
     }
 
     void testChannelsAndMetadata(const std::filesystem::path& root)
@@ -464,6 +634,9 @@ namespace
         require(xml.find("Namespace=\"urn:test:acquisition\"") != std::string::npos
                     && xml.find("urn:scopewriter:frame-metadata") != std::string::npos,
                 "OME-TIFF structured metadata is missing");
+        require(xml.find("<AnnotationRef ID=\"Annotation:Global:0\"/>")
+                    != std::string::npos,
+                "OME-TIFF global metadata annotation is not referenced");
         require(xml.find("StageLabel Name=\"Control\" X=\"100\"") != std::string::npos,
                 "OME-TIFF position metadata is missing");
 
@@ -497,6 +670,19 @@ namespace
         require(frames.find("\"c\":1") != std::string::npos
                     && frames.find("temperatureC") != std::string::npos,
                 "OME-Zarr frame channel metadata is missing");
+
+        scopewriter::DatasetFrameLocation location;
+        location.format = scopewriter::Format::OmeZarr;
+        location.dataPath = settings.outputPath / "0";
+        location.c = 1;
+        scopewriter::DatasetFrame stored;
+        std::string error;
+        require(scopewriter::datasetFrame(location, stored, error), error);
+        require(stored.pixelType == settings.pixelType
+                    && stored.significantBits == settings.significantBits
+                    && stored.bytes.size() == frame.size() * sizeof(std::uint16_t)
+                    && std::memcmp(stored.bytes.data(), frame.data(), stored.bytes.size()) == 0,
+                "OME-Zarr dataset frame bit depth is incorrect");
     }
 
     void testAcquisitionOrder(const std::filesystem::path& root)
@@ -694,6 +880,13 @@ namespace
         settings.format = scopewriter::Format::OmeZarr;
         settings.zarrChunkWidth = 0;
         rejects("chunk and shard");
+        settings.zarrChunkWidth = 512;
+        settings.zarrMaxQueuedFrameBytes = 3;
+        rejects("queued frame byte limit");
+        settings.zarrMaxQueuedFrameBytes = 0;
+        settings.zarrWorkerCount = (std::numeric_limits<unsigned int>::max)();
+        rejects("worker count");
+        settings.zarrWorkerCount = 0;
         settings.format = scopewriter::Format::OmeTiff;
         settings.zarrChunkWidth = 512;
         settings.timeCount = 1;
@@ -807,6 +1000,27 @@ namespace
                     "Plain TIFF pixels changed during writing");
             TIFFClose(tiff);
 
+            scopewriter::DatasetFrameLocation location;
+            location.format = scopewriter::Format::Tiff;
+            location.dataPath = path;
+            location.frameIndex = 1;
+            scopewriter::DatasetFrame stored;
+            std::string error;
+            require(scopewriter::datasetFrame(location, stored, error), error);
+            require(stored.width == settings.width && stored.height == settings.height
+                        && stored.pixelType == settings.pixelType
+                        && stored.significantBits == settings.significantBits
+                        && stored.metadata.cameraId == metadata.cameraId
+                        && stored.metadata.frameIndex == metadata.frameIndex
+                        && stored.metadata.timestampNs == metadata.timestampNs
+                        && stored.metadata.sourceRoiX == metadata.sourceRoiX
+                        && stored.metadata.sourceRoiY == metadata.sourceRoiY
+                        && stored.metadata.sourceRoiWidth == metadata.sourceRoiWidth
+                        && stored.metadata.sourceRoiHeight == metadata.sourceRoiHeight
+                        && stored.bytes.size() == byteCount
+                        && std::memcmp(stored.bytes.data(), pixels, byteCount) == 0,
+                    "Plain TIFF dataset frame or metadata is incorrect");
+
             scopewriter::Writer existing;
             require(!existing.open(settings), "Plain TIFF replaced existing data by default");
             settings.overwrite = true;
@@ -872,6 +1086,28 @@ namespace
                     && csv.find("\"Camera, \"\"A\"\"\",21,987654321,2,2,12,6,Mono16,1,12,3,4,2,2\n")
                         != std::string::npos,
                 "Binary frame metadata CSV is incorrect");
+
+        scopewriter::DatasetFrameLocation location;
+        location.format = scopewriter::Format::Binary;
+        location.dataPath = settings.outputPath;
+        location.frameMetadataPath = settings.frameMetadataPath;
+        location.frameIndex = 1;
+        scopewriter::DatasetFrame stored;
+        std::string error;
+        require(scopewriter::datasetFrame(location, stored, error), error);
+        require(stored.bytes == second
+                    && stored.width == settings.width && stored.height == settings.height
+                    && stored.pixelType == settings.pixelType
+                    && stored.significantBits == settings.significantBits
+                    && stored.metadata.cameraId == metadata.cameraId
+                    && stored.metadata.frameIndex == 22
+                    && stored.metadata.timestampNs == metadata.timestampNs
+                    && stored.metadata.stride == metadata.stride
+                    && stored.metadata.sourceRoiX == metadata.sourceRoiX
+                    && stored.metadata.sourceRoiY == metadata.sourceRoiY
+                    && stored.metadata.sourceRoiWidth == metadata.sourceRoiWidth
+                    && stored.metadata.sourceRoiHeight == metadata.sourceRoiHeight,
+                "Binary dataset frame or metadata is incorrect");
 
         scopewriter::Writer existing;
         require(!existing.open(settings), "Binary writer replaced existing data by default");
@@ -947,6 +1183,7 @@ int main(int argc, char** argv)
         testOmeZarr(root);
         testOmeZarrMultiChunkShard(root);
         testOmeZarrConfigurableShards(root);
+        testCheckpointsAndTiffStrips(root);
         testChannelsAndMetadata(root);
         testAcquisitionOrder(root);
         testMultiPositionLayout(root);

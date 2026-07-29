@@ -76,6 +76,7 @@ set(_scopewriter_zarr_libraries
 )
 
 add_library(ScopeWriter SHARED
+        src/DatasetFrame.cpp
         src/ScopeWriter.cpp
         src/ZarrWriter.cpp
         src/ZarrWriter.h

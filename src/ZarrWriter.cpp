@@ -9,8 +9,8 @@
 #include "zarr/ThreadPool.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdint>
-#include <deque>
 #include <exception>
 #include <fstream>
 #include <iomanip>
@@ -18,6 +18,13 @@
 #include <sstream>
 #include <thread>
 #include <utility>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace scopewriter::internal
 {
@@ -92,10 +99,11 @@ namespace scopewriter::internal
             return output.str();
         }
 
-        bool writeFile(const std::filesystem::path& path,
-                       const void* data,
-                       std::size_t byteCount,
-                       std::string& error)
+        // Replace one metadata file atomically
+        bool writeFileAtomically(const std::filesystem::path& path,
+                                 const void* data,
+                                 std::size_t byteCount,
+                                 std::string& error)
         {
             std::error_code filesystemError;
             std::filesystem::create_directories(path.parent_path(), filesystemError);
@@ -104,19 +112,42 @@ namespace scopewriter::internal
                 error = "Failed to create OME-Zarr directory: " + filesystemError.message();
                 return false;
             }
-            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            std::filesystem::path temporary = path;
+            temporary += ".scopewriter.tmp";
+            std::filesystem::remove(temporary, filesystemError);
+            filesystemError.clear();
+            std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
             if (!output)
             {
-                error = "Failed to open OME-Zarr file for writing";
+                error = "Failed to open temporary OME-Zarr metadata";
                 return false;
             }
             output.write(static_cast<const char*>(data), static_cast<std::streamsize>(byteCount));
             output.close();
             if (!output)
             {
-                error = "Failed to write OME-Zarr file";
+                std::filesystem::remove(temporary, filesystemError);
+                error = "Failed to write temporary OME-Zarr metadata";
                 return false;
             }
+#if defined(_WIN32)
+            if (!MoveFileExW(temporary.c_str(),
+                             path.c_str(),
+                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            {
+                std::filesystem::remove(temporary, filesystemError);
+                error = "Failed to replace OME-Zarr metadata";
+                return false;
+            }
+#else
+            std::filesystem::rename(temporary, path, filesystemError);
+            if (filesystemError)
+            {
+                std::filesystem::remove(temporary, filesystemError);
+                error = "Failed to replace OME-Zarr metadata";
+                return false;
+            }
+#endif
             return true;
         }
 
@@ -124,9 +155,10 @@ namespace scopewriter::internal
                            const std::string& text,
                            std::string& error)
         {
-            return writeFile(path, text.data(), text.size(), error);
+            return writeFileAtomically(path, text.data(), text.size(), error);
         }
 
+        // Build multiscale group metadata
         std::string groupMetadata(const WriterSettings& settings,
                                   const std::string& customMetadata,
                                   int positionIndex)
@@ -240,6 +272,7 @@ namespace scopewriter::internal
             return json.str();
         }
 
+        // Build Zarr array metadata for the current shape
         std::string arrayMetadata(const WriterSettings& settings, std::int64_t sizeT)
         {
             const int chunkWidthValue = chunkWidth(settings);
@@ -286,6 +319,7 @@ namespace scopewriter::internal
         }
     }
 
+    // Own the queues workers and active series state
     struct ZarrWriter::Impl
     {
         void setWorkerError(std::string error)
@@ -341,12 +375,9 @@ namespace scopewriter::internal
             return true;
         }
 
-        bool processFrame(zarr::FrameQueue::Frame frame, std::string& error)
+        // Split one frame into chunks and shards
+        bool processFrame(zarr::FrameQueue::Frame& frame, std::string& error)
         {
-            while (!shards.empty() && shards.front().expired())
-            {
-                shards.pop_front();
-            }
             const int chunkWidthValue = chunkWidth(settings);
             const int chunkHeightValue = chunkHeight(settings);
             const int chunksX = chunkCount(settings.width, chunkWidthValue);
@@ -376,7 +407,6 @@ namespace scopewriter::internal
                     auto shard = std::make_shared<zarr::Shard>(shardPath,
                                                                chunksPerShard,
                                                                handlePool);
-                    shards.push_back(shard);
                     for (int localChunkY = 0; localChunkY < shardChunksY; ++localChunkY)
                     {
                         for (int localChunkX = 0; localChunkX < shardChunksX; ++localChunkX)
@@ -449,22 +479,26 @@ namespace scopewriter::internal
             return true;
         }
 
+        // Forward queued frames to chunk workers
         void consumeFrames()
         {
             zarr::FrameQueue::Frame frame;
             while (frameQueue->pop(frame))
             {
                 std::string error;
+                bool success = false;
                 try
                 {
-                    if (processFrame(std::move(frame), error))
-                    {
-                        continue;
-                    }
+                    success = processFrame(frame, error);
                 }
                 catch (const std::exception& exception)
                 {
                     error = exception.what();
+                }
+                frameQueue->finish(frame);
+                if (success)
+                {
+                    continue;
                 }
                 setWorkerError(std::move(error));
                 return;
@@ -479,23 +513,25 @@ namespace scopewriter::internal
         std::unique_ptr<zarr::FrameQueue> frameQueue;
         std::unique_ptr<zarr::ThreadPool> threadPool;
         std::thread frameConsumer;
-        std::deque<std::weak_ptr<zarr::Shard>> shards;
         mutable std::mutex stateMutex;
         std::string workerError;
         bool open{false};
     };
 
+    // Create an empty Zarr backend
     ZarrWriter::ZarrWriter()
         : m_impl(std::make_unique<Impl>())
     {
     }
 
+    // Close any active Zarr output before destruction
     ZarrWriter::~ZarrWriter()
     {
         std::string ignored;
         close(ignored);
     }
 
+    // Create metadata and start worker queues
     bool ZarrWriter::open(const WriterSettings& settings,
                           const std::vector<std::string>& seriesNames,
                           const std::vector<std::string>& seriesMetadata,
@@ -515,7 +551,6 @@ namespace scopewriter::internal
         m_impl->seriesNames = seriesNames;
         m_impl->seriesMetadata = seriesMetadata;
         m_impl->sizeT.assign(static_cast<std::size_t>(settings.positionCount), 0);
-        m_impl->shards.clear();
         {
             std::lock_guard lock(m_impl->stateMutex);
             m_impl->workerError.clear();
@@ -527,20 +562,31 @@ namespace scopewriter::internal
         }
 
         const unsigned int hardwareThreads = (std::max)(1u, std::thread::hardware_concurrency());
-        const unsigned int workerCount = hardwareThreads;
+        const unsigned int automaticWorkers = (std::min)(
+            hardwareThreads > 1 ? hardwareThreads - 1 : 1u,
+            8u);
+        const unsigned int workerCount = settings.zarrWorkerCount == 0
+            ? automaticWorkers
+            : settings.zarrWorkerCount;
         const std::size_t frameBytes = static_cast<std::size_t>(settings.width)
             * static_cast<std::size_t>(settings.height)
             * (settings.pixelType == PixelType::UInt8 ? 1u : 2u);
-        const std::size_t frameCapacity = (std::clamp)(
+        const std::size_t automaticFrameCapacity = (std::clamp)(
             static_cast<std::size_t>(workerCount) * 2,
             std::size_t{2},
             std::size_t{8});
+        const std::size_t byteCapacity = settings.zarrMaxQueuedFrameBytes == 0
+            ? frameBytes * automaticFrameCapacity
+            : settings.zarrMaxQueuedFrameBytes;
+        const std::size_t frameCapacity = settings.zarrMaxQueuedFrameBytes == 0
+            ? automaticFrameCapacity
+            : (std::max)(std::size_t{1}, byteCapacity / frameBytes);
         try
         {
             m_impl->handlePool = std::make_shared<zarr::FileHandlePool>();
             m_impl->frameQueue = std::make_unique<zarr::FrameQueue>(
                 frameCapacity,
-                frameBytes * frameCapacity);
+                byteCapacity);
             m_impl->threadPool = std::make_unique<zarr::ThreadPool>(
                 workerCount,
                 static_cast<std::size_t>(workerCount) * 2,
@@ -577,6 +623,7 @@ namespace scopewriter::internal
         return true;
     }
 
+    // Queue one frame for asynchronous storage
     bool ZarrWriter::append(int positionIndex,
                             std::int64_t t,
                             int c,
@@ -604,8 +651,8 @@ namespace scopewriter::internal
         frame.zeroFill = data == nullptr;
         if (data != nullptr)
         {
-            const auto* bytes = static_cast<const std::uint8_t*>(data);
-            frame.data.assign(bytes, bytes + byteCount);
+            frame.data = m_impl->frameQueue->acquireBuffer(byteCount);
+            std::memcpy(frame.data.data(), data, byteCount);
         }
 
         if (!m_impl->frameQueue->push(std::move(frame)))
@@ -622,6 +669,32 @@ namespace scopewriter::internal
         return true;
     }
 
+    // Wait for workers and checkpoint metadata
+    bool ZarrWriter::flush(std::string& error)
+    {
+        if (!m_impl->open)
+        {
+            error = "OME-Zarr writer is not open";
+            return false;
+        }
+        if (!m_impl->frameQueue->waitIdle() || !m_impl->threadPool->waitIdle())
+        {
+            error = m_impl->currentWorkerError();
+            if (error.empty())
+            {
+                error = "Failed to flush OME-Zarr workers";
+            }
+            return false;
+        }
+        error = m_impl->currentWorkerError();
+        if (!error.empty())
+        {
+            return false;
+        }
+        return m_impl->writeMetadata(error);
+    }
+
+    // Drain workers and finalize metadata
     bool ZarrWriter::close(std::string& error)
     {
         if (!m_impl->open)
@@ -637,21 +710,7 @@ namespace scopewriter::internal
         m_impl->open = false;
 
         std::string workerError = m_impl->currentWorkerError();
-        for (const auto& weakShard : m_impl->shards)
-        {
-            const auto shard = weakShard.lock();
-            if (!shard)
-            {
-                continue;
-            }
-            std::string finalizeError;
-            if (!shard->finalize(finalizeError) && workerError.empty())
-            {
-                workerError = std::move(finalizeError);
-            }
-        }
         const bool metadataWritten = workerError.empty() && m_impl->writeMetadata(error);
-        m_impl->shards.clear();
         m_impl->threadPool.reset();
         m_impl->frameQueue.reset();
         m_impl->handlePool.reset();

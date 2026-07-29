@@ -29,6 +29,7 @@ namespace scopewriter::internal
                     const void* data,
                     std::size_t byteCount,
                     std::string& error);
+        bool flush(std::string& error);
         bool close(std::string& error);
 
     private:

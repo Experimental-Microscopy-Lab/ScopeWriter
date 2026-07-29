@@ -8,6 +8,7 @@
 
 namespace scopewriter::internal::zarr
 {
+    // Create a filesystem sink for one shard
     FileSink::FileSink(std::filesystem::path path,
                        std::shared_ptr<FileHandlePool> handlePool)
         : m_path(std::move(path)), m_handlePool(std::move(handlePool))
@@ -21,11 +22,13 @@ namespace scopewriter::internal::zarr
         }
     }
 
+    // Release the cached file handle
     FileSink::~FileSink()
     {
         m_handlePool->close(m_path);
     }
 
+    // Write one byte range into the shard
     bool FileSink::write(std::uint64_t offset,
                          const std::uint8_t* data,
                          std::size_t byteCount,
@@ -48,6 +51,7 @@ namespace scopewriter::internal::zarr
         }
     }
 
+    // Flush the shard exactly once
     bool FileSink::finalize(std::string& error)
     {
         std::lock_guard lock(m_mutex);

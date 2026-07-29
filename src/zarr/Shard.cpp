@@ -14,6 +14,7 @@ namespace scopewriter::internal::zarr
     {
         constexpr std::uint64_t kUnwritten = (std::numeric_limits<std::uint64_t>::max)();
 
+        // Append one little endian 64 bit value
         void appendLittleEndian64(std::vector<std::uint8_t>& output, std::uint64_t value)
         {
             for (int byte = 0; byte < 8; ++byte)
@@ -22,6 +23,7 @@ namespace scopewriter::internal::zarr
             }
         }
 
+        // Append one little endian 32 bit value
         void appendLittleEndian32(std::vector<std::uint8_t>& output, std::uint32_t value)
         {
             for (int byte = 0; byte < 4; ++byte)
@@ -31,6 +33,7 @@ namespace scopewriter::internal::zarr
         }
     }
 
+    // Create a shard with unwritten index entries
     Shard::Shard(std::filesystem::path path,
                  std::size_t chunkCount,
                  std::shared_ptr<FileHandlePool> handlePool)
@@ -45,12 +48,14 @@ namespace scopewriter::internal::zarr
         }
     }
 
+    // Finalize any remaining shard index
     Shard::~Shard()
     {
         std::string ignored;
         finalize(ignored);
     }
 
+    // Store one encoded chunk in this shard
     bool Shard::writeChunk(std::size_t index,
                            const std::vector<std::uint8_t>& data,
                            std::string& error)
@@ -85,6 +90,7 @@ namespace scopewriter::internal::zarr
         return finishChunk(error);
     }
 
+    // Mark one zero filled chunk as complete
     bool Shard::skipChunk(std::size_t index, std::string& error)
     {
         if (index >= m_offsets.size())
@@ -95,6 +101,7 @@ namespace scopewriter::internal::zarr
         return finishChunk(error);
     }
 
+    // Finalize the shard when its last chunk completes
     bool Shard::finishChunk(std::string& error)
     {
         const std::size_t previous = m_unwrittenChunks.fetch_sub(1);
@@ -111,12 +118,14 @@ namespace scopewriter::internal::zarr
         return finalizeLocked(error);
     }
 
+    // Finalize this shard under synchronization
     bool Shard::finalize(std::string& error)
     {
         std::lock_guard lock(m_mutex);
         return finalizeLocked(error);
     }
 
+    // Write the index and flush the shard
     bool Shard::finalizeLocked(std::string& error)
     {
         if (m_finalized)
@@ -133,6 +142,7 @@ namespace scopewriter::internal::zarr
         return m_finalizeResult = true;
     }
 
+    // Append the indexed sharding table and checksum
     bool Shard::writeIndex(std::string& error)
     {
         std::vector<std::uint8_t> index;

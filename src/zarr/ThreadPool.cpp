@@ -2,20 +2,18 @@
 
 #include "ThreadPool.h"
 
-#include <algorithm>
 #include <exception>
 #include <utility>
 
 namespace scopewriter::internal::zarr
 {
+    // Start a bounded worker pool
     ThreadPool::ThreadPool(unsigned int threadCount,
                            std::size_t queueCapacity,
                            ErrorCallback errorCallback)
         : m_errorCallback(std::move(errorCallback)),
-          m_queueCapacity((std::max)(queueCapacity, std::size_t{1}))
+          m_queueCapacity(queueCapacity)
     {
-        const unsigned int available = (std::max)(std::thread::hardware_concurrency(), 1u);
-        threadCount = (std::clamp)(threadCount, 1u, available);
         m_threads.reserve(threadCount);
         try
         {
@@ -42,19 +40,21 @@ namespace scopewriter::internal::zarr
         }
     }
 
+    // Stop and join all worker threads
     ThreadPool::~ThreadPool()
     {
         awaitStop();
     }
 
+    // Enqueue one task with bounded backpressure
     bool ThreadPool::push(Task task)
     {
         std::unique_lock lock(m_mutex);
         m_queueSpace.wait(lock, [this]
         {
-            return !m_accepting || m_failed || m_tasks.size() < m_queueCapacity;
+            return !m_accepting || m_tasks.size() < m_queueCapacity;
         });
-        if (!m_accepting || m_failed)
+        if (!m_accepting)
         {
             return false;
         }
@@ -64,6 +64,18 @@ namespace scopewriter::internal::zarr
         return true;
     }
 
+    // Wait until every queued task completes
+    bool ThreadPool::waitIdle()
+    {
+        std::unique_lock lock(m_mutex);
+        m_idle.wait(lock, [this]
+        {
+            return m_tasks.empty() && m_activeTasks == 0;
+        });
+        return !m_failed;
+    }
+
+    // Stop accepting tasks and join all workers
     void ThreadPool::awaitStop()
     {
         {
@@ -82,6 +94,7 @@ namespace scopewriter::internal::zarr
         m_threads.clear();
     }
 
+    // Process tasks until the pool stops
     void ThreadPool::run()
     {
         while (true)
@@ -99,6 +112,7 @@ namespace scopewriter::internal::zarr
                 }
                 task = std::move(m_tasks.front());
                 m_tasks.pop();
+                ++m_activeTasks;
                 m_queueSpace.notify_one();
             }
 
@@ -116,26 +130,32 @@ namespace scopewriter::internal::zarr
             {
                 error = "Unknown OME-Zarr worker failure";
             }
-            if (success)
+            bool reportError = false;
+            {
+                std::lock_guard lock(m_mutex);
+                --m_activeTasks;
+                if (!success && !m_failed)
+                {
+                    m_failed = true;
+                    m_accepting = false;
+                    while (!m_tasks.empty())
+                    {
+                        m_tasks.pop();
+                    }
+                    reportError = true;
+                }
+                if (m_tasks.empty() && m_activeTasks == 0)
+                {
+                    m_idle.notify_all();
+                }
+            }
+            if (!reportError)
             {
                 continue;
             }
-
-            {
-                std::lock_guard lock(m_mutex);
-                if (m_failed)
-                {
-                    continue;
-                }
-                m_failed = true;
-                m_accepting = false;
-                while (!m_tasks.empty())
-                {
-                    m_tasks.pop();
-                }
-            }
             m_taskReady.notify_all();
             m_queueSpace.notify_all();
+            m_idle.notify_all();
             m_errorCallback(error.empty() ? "OME-Zarr worker failed" : std::move(error));
         }
     }

@@ -32,6 +32,7 @@ int main(int argc, char** argv)
     scopewriter::Writer writer;
     if (!writer.open(settings)
         || !writer.append(frame.data(), frame.size() * sizeof(std::uint16_t))
+        || !writer.flush()
         || !writer.close())
     {
         std::cerr << writer.lastError() << '\n';

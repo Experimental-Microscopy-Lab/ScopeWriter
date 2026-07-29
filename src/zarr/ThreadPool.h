@@ -27,6 +27,7 @@ namespace scopewriter::internal::zarr
         ThreadPool& operator=(const ThreadPool&) = delete;
 
         bool push(Task task);
+        bool waitIdle();
         void awaitStop();
 
     private:
@@ -36,9 +37,11 @@ namespace scopewriter::internal::zarr
         std::vector<std::thread> m_threads;
         std::queue<Task> m_tasks;
         std::size_t m_queueCapacity;
+        std::size_t m_activeTasks{0};
         std::mutex m_mutex;
         std::condition_variable m_taskReady;
         std::condition_variable m_queueSpace;
+        std::condition_variable m_idle;
         bool m_accepting{true};
         bool m_failed{false};
     };

@@ -101,6 +101,8 @@ namespace scopewriter
         int zarrChunkHeight{512};
         int zarrShardWidthChunks{0};
         int zarrShardHeightChunks{0};
+        unsigned int zarrWorkerCount{0};
+        std::size_t zarrMaxQueuedFrameBytes{0};
     };
 
     struct FrameMetadata
@@ -124,6 +126,31 @@ namespace scopewriter
         MetadataMap metadata;
     };
 
+    struct DatasetFrameLocation
+    {
+        Format format{Format::OmeTiff};
+        std::filesystem::path dataPath;
+        std::filesystem::path frameMetadataPath;
+        std::uint64_t frameIndex{0};
+        std::int64_t t{0};
+        int c{0};
+        int z{0};
+    };
+
+    struct DatasetFrame
+    {
+        int width{0};
+        int height{0};
+        PixelType pixelType{PixelType::UInt16};
+        int significantBits{0};
+        FrameMetadata metadata;
+        std::vector<std::uint8_t> bytes;
+    };
+
+    SCOPEWRITER_API bool datasetFrame(const DatasetFrameLocation& location,
+                                      DatasetFrame& frame,
+                                      std::string& error);
+
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable: 4251)
@@ -141,6 +168,7 @@ namespace scopewriter
 
         bool open(const WriterSettings& settings);
         bool append(const void* data, std::size_t byteCount, const FrameMetadata& metadata = {});
+        bool flush();
         bool close();
         bool isOpen() const noexcept;
         const std::string& lastError() const noexcept;
