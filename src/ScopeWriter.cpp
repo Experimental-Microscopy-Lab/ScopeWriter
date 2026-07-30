@@ -1390,6 +1390,7 @@ namespace scopewriter
                 m_jobs.clear();
                 m_freeFrames.clear();
                 m_activeJobs = 0;
+                m_metadataRevision = 0;
                 m_workerError.clear();
                 m_accepting = true;
                 m_open = true;
@@ -1581,7 +1582,7 @@ namespace scopewriter
                 std::string uuid;
                 TIFF* tiff{nullptr};
                 std::vector<Plane> planes;
-                std::size_t checkpointedPlanes{0};
+                std::uint64_t checkpointedRevision{0};
             };
 
             struct Job
@@ -1626,7 +1627,8 @@ namespace scopewriter
                     error = "OME-TIFF output is not open";
                     return false;
                 }
-                const bool metadataChanged = series.planes.size() != series.checkpointedPlanes;
+                const bool metadataChanged = !series.planes.empty()
+                    && series.checkpointedRevision != m_metadataRevision;
                 if (metadataChanged)
                 {
                     const std::string xml = buildMetadata(series);
@@ -1645,7 +1647,7 @@ namespace scopewriter
                 }
                 if (metadataChanged)
                 {
-                    series.checkpointedPlanes = series.planes.size();
+                    series.checkpointedRevision = m_metadataRevision;
                 }
                 if (!reopen || !metadataChanged)
                 {
@@ -1825,6 +1827,7 @@ namespace scopewriter
                     if (error.empty()) error = "Failed to write the OME-TIFF frame";
                     return false;
                 }
+                ++m_metadataRevision;
                 return true;
             }
             WriterSettings m_settings;
@@ -1842,6 +1845,7 @@ namespace scopewriter
             std::string m_workerError;
             std::size_t m_queueCapacity{8};
             std::size_t m_activeJobs{0};
+            std::uint64_t m_metadataRevision{0};
             bool m_accepting{false};
             bool m_open{false};
         };

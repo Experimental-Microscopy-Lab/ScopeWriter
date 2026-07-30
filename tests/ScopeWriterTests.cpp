@@ -769,6 +769,7 @@ namespace
         scopewriter::FrameMetadata alpha;
         alpha.t = 0;
         require(writer.append(frame.data(), frame.size(), alpha), writer.lastError());
+        require(writer.flush(), writer.lastError());
         scopewriter::FrameMetadata beta;
         beta.positionIndex = 1;
         beta.t = 0;
