@@ -43,7 +43,6 @@ add_subdirectory(
         "${CMAKE_CURRENT_BINARY_DIR}/third_party/zstd"
         EXCLUDE_FROM_ALL
 )
-add_library(zstd::libzstd_static ALIAS libzstd_static)
 
 set(tiff-static ON CACHE BOOL "" FORCE)
 set(tiff-tools OFF CACHE BOOL "" FORCE)
@@ -71,7 +70,7 @@ add_subdirectory(
 find_package(Threads REQUIRED)
 set(_scopewriter_zarr_libraries
         Crc32c::crc32c
-        zstd::libzstd_static
+        libzstd_static
         Threads::Threads
 )
 
