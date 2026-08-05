@@ -2,9 +2,7 @@
 
 [![Compile Check](https://github.com/Experimental-Microscopy-Lab/ScopeWriter/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/Experimental-Microscopy-Lab/ScopeWriter/actions/workflows/windows-ci.yml)
 
-ScopeWriter is a C++ library for writing microscopy image streams. It can be used as a CMake subproject or installed package.
-
-The project is under active development and its API may change before 1.0.
+ScopeWriter is a C++ library for writing microscopy image streams.
 
 ## Formats
 
@@ -15,15 +13,13 @@ The project is under active development and its API may change before 1.0.
 | TIFF | Multi-page BigTIFF with per-frame JSON metadata | Deflate or none |
 | Binary | Raw frames with a CSV index | None |
 
-Unsigned 8-bit and 16-bit frames, TCZP coordinates, physical metadata and
-unbounded time series are supported. Input rows may be tightly packed or use a
-larger byte stride. A zero stride means tightly packed rows, and zero
-`significantBits` uses the full width of the selected pixel type.
+Supports unsigned 8-bit and 16-bit frames, TCZP coordinates, physical metadata,
+unbounded time series and row strides. A zero stride means tightly packed rows;
+zero `significantBits` uses the pixel type width.
 
 ## Build
 
-Requirements are CMake 3.23 or newer and a C++20 compiler. Dependencies are
-bundled, so configuration does not download packages.
+Requires CMake 3.23 or newer and a C++20 compiler. Dependencies are bundled.
 
 ```powershell
 cmake -S . -B build
@@ -32,9 +28,7 @@ ctest --test-dir build -C Release --output-on-failure
 cmake --install build --config Release --prefix install
 ```
 
-Tests are enabled for standalone builds and disabled when used as a subproject.
-
-## CMake integration
+## Use
 
 From source:
 
