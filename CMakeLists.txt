@@ -8,9 +8,10 @@ include(CMakePackageConfigHelpers)
 option(SCOPEWRITER_BUILD_TESTS "Build ScopeWriter tests" ${PROJECT_IS_TOP_LEVEL})
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 set(_scopewriter_third_party_dir "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
-set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_EXAMPLES OFF)
 set(SKIP_INSTALL_ALL ON)
 add_subdirectory(
         "${_scopewriter_third_party_dir}/zlib"
@@ -20,10 +21,10 @@ add_subdirectory(
 unset(SKIP_INSTALL_ALL)
 add_library(ZLIB::ZLIB ALIAS zlibstatic)
 
-set(CRC32C_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(CRC32C_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-set(CRC32C_USE_GLOG OFF CACHE BOOL "" FORCE)
-set(CRC32C_INSTALL OFF CACHE BOOL "" FORCE)
+set(CRC32C_BUILD_TESTS OFF)
+set(CRC32C_BUILD_BENCHMARKS OFF)
+set(CRC32C_USE_GLOG OFF)
+set(CRC32C_INSTALL OFF)
 add_subdirectory(
         "${_scopewriter_third_party_dir}/crc32c"
         "${CMAKE_CURRENT_BINARY_DIR}/third_party/crc32c"
@@ -31,36 +32,36 @@ add_subdirectory(
 )
 add_library(Crc32c::crc32c ALIAS crc32c)
 
-set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
-set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
-set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_PROGRAMS OFF)
+set(ZSTD_BUILD_SHARED OFF)
+set(ZSTD_BUILD_STATIC ON)
+set(ZSTD_BUILD_TESTS OFF)
+set(ZSTD_BUILD_CONTRIB OFF)
+set(ZSTD_LEGACY_SUPPORT OFF)
+set(ZSTD_MULTITHREAD_SUPPORT OFF)
 add_subdirectory(
         "${_scopewriter_third_party_dir}/zstd/build/cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/third_party/zstd"
         EXCLUDE_FROM_ALL
 )
 
-set(tiff-static ON CACHE BOOL "" FORCE)
-set(tiff-tools OFF CACHE BOOL "" FORCE)
-set(tiff-tests OFF CACHE BOOL "" FORCE)
-set(tiff-contrib OFF CACHE BOOL "" FORCE)
-set(tiff-docs OFF CACHE BOOL "" FORCE)
-set(tiff-install OFF CACHE BOOL "" FORCE)
-set(tiff-cxx OFF CACHE BOOL "" FORCE)
-set(zlib ON CACHE BOOL "" FORCE)
-set(libdeflate OFF CACHE BOOL "" FORCE)
-set(jpeg OFF CACHE BOOL "" FORCE)
-set(old-jpeg OFF CACHE BOOL "" FORCE)
-set(jpeg12 OFF CACHE BOOL "" FORCE)
-set(jbig OFF CACHE BOOL "" FORCE)
-set(lerc OFF CACHE BOOL "" FORCE)
-set(lzma OFF CACHE BOOL "" FORCE)
-set(zstd OFF CACHE BOOL "" FORCE)
-set(webp OFF CACHE BOOL "" FORCE)
+set(tiff-static ON)
+set(tiff-tools OFF)
+set(tiff-tests OFF)
+set(tiff-contrib OFF)
+set(tiff-docs OFF)
+set(tiff-install OFF)
+set(tiff-cxx OFF)
+set(zlib ON)
+set(libdeflate OFF)
+set(jpeg OFF)
+set(old-jpeg OFF)
+set(jpeg12 OFF)
+set(jbig OFF)
+set(lerc OFF)
+set(lzma OFF)
+set(zstd OFF)
+set(webp OFF)
 add_subdirectory(
         "${_scopewriter_third_party_dir}/libtiff"
         "${CMAKE_CURRENT_BINARY_DIR}/third_party/libtiff"

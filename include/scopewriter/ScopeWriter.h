@@ -75,6 +75,7 @@ namespace scopewriter
         int width{0};
         int height{0};
         PixelType pixelType{PixelType::UInt16};
+        // Zero uses the pixel storage width
         int significantBits{0};
         int positionCount{1};
         int timeCount{0};
@@ -110,6 +111,7 @@ namespace scopewriter
         std::string cameraId;
         std::uint64_t frameIndex{0};
         std::uint64_t timestampNs{0};
+        // Zero uses tightly packed rows
         std::size_t stride{0};
         int sourceRoiX{0};
         int sourceRoiY{0};

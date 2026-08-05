@@ -36,8 +36,10 @@ namespace scopewriter::internal::zarr
         std::unique_lock lock(m_mutex);
         m_queueSpace.wait(lock, [this, frameBytes]
         {
-            const bool fitsBytes = m_frames.empty() || m_bytesUsed + frameBytes <= m_byteCapacity;
-            return !m_accepting || (m_frames.size() < m_frameCapacity && fitsBytes);
+            const bool fitsBytes = m_bytesUsed <= m_byteCapacity
+                && frameBytes <= m_byteCapacity - m_bytesUsed;
+            return !m_accepting
+                || (m_frames.size() + m_processing < m_frameCapacity && fitsBytes);
         });
         if (!m_accepting)
         {
@@ -64,29 +66,30 @@ namespace scopewriter::internal::zarr
         }
         frame = std::move(m_frames.front());
         m_frames.pop_front();
-        m_bytesUsed -= frame.data.size();
         ++m_processing;
-        lock.unlock();
-        m_queueSpace.notify_one();
         return true;
     }
 
     // Mark one frame complete and recycle its buffer
     void FrameQueue::finish(Frame& frame)
     {
-        std::lock_guard lock(m_mutex);
-        if (!m_aborted
-            && !frame.data.empty()
-            && m_freeBuffers.size() < m_frameCapacity)
         {
-            frame.data.clear();
-            m_freeBuffers.push_back(std::move(frame.data));
+            std::lock_guard lock(m_mutex);
+            m_bytesUsed -= frame.data.size();
+            if (!m_aborted
+                && !frame.data.empty()
+                && m_freeBuffers.size() < m_frameCapacity)
+            {
+                frame.data.clear();
+                m_freeBuffers.push_back(std::move(frame.data));
+            }
+            --m_processing;
+            if (m_frames.empty() && m_processing == 0)
+            {
+                m_idle.notify_all();
+            }
         }
-        --m_processing;
-        if (m_frames.empty() && m_processing == 0)
-        {
-            m_idle.notify_all();
-        }
+        m_queueSpace.notify_one();
     }
 
     // Wait until every queued frame completes
@@ -118,8 +121,11 @@ namespace scopewriter::internal::zarr
             std::lock_guard lock(m_mutex);
             m_aborted = true;
             m_accepting = false;
+            for (const auto& frame : m_frames)
+            {
+                m_bytesUsed -= frame.data.size();
+            }
             m_frames.clear();
-            m_bytesUsed = 0;
         }
         m_dataReady.notify_all();
         m_queueSpace.notify_all();

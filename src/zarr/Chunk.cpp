@@ -11,6 +11,24 @@
 
 namespace scopewriter::internal::zarr
 {
+    namespace
+    {
+        struct ZstdContext
+        {
+            ZstdContext()
+                : value(ZSTD_createCCtx())
+            {
+            }
+
+            ~ZstdContext()
+            {
+                ZSTD_freeCCtx(value);
+            }
+
+            ZSTD_CCtx* value{nullptr};
+        };
+    }
+
     // Allocate a zero filled chunk buffer
     Chunk::Chunk(std::size_t byteCount, std::size_t bytesPerSample)
         : m_bytesPerSample(bytesPerSample), m_buffer(byteCount, 0)
@@ -39,8 +57,7 @@ namespace scopewriter::internal::zarr
             throw std::out_of_range("OME-Zarr tile exceeds chunk buffer");
         }
 
-        std::lock_guard lock(m_mutex);
-        bool anyData = m_hasData.load(std::memory_order_relaxed);
+        bool anyData = m_hasData;
         for (std::size_t row = 0; row < rowCount; ++row)
         {
             const auto* sourceRow = source + row * sourceStride;
@@ -57,13 +74,13 @@ namespace scopewriter::internal::zarr
                                       });
             }
         }
-        m_hasData.store(anyData, std::memory_order_relaxed);
+        m_hasData = anyData;
     }
 
     // Report whether the chunk contains any nonzero byte
     bool Chunk::hasData() const noexcept
     {
-        return m_hasData.load(std::memory_order_relaxed);
+        return m_hasData;
     }
 
     // Finalize byte order and transfer encoded chunk data
@@ -72,7 +89,6 @@ namespace scopewriter::internal::zarr
                                 std::vector<std::uint8_t>& output,
                                 std::string& error)
     {
-        std::lock_guard lock(m_mutex);
         if (m_buffer.empty())
         {
             error = "OME-Zarr chunk was already consumed";
@@ -94,12 +110,19 @@ namespace scopewriter::internal::zarr
             return true;
         }
 
+        thread_local ZstdContext context;
+        if (context.value == nullptr)
+        {
+            error = "Failed to create OME-Zarr compression context";
+            return false;
+        }
         output.resize(ZSTD_compressBound(m_buffer.size()));
-        const std::size_t compressedSize = ZSTD_compress(output.data(),
-                                                         output.size(),
-                                                         m_buffer.data(),
-                                                         m_buffer.size(),
-                                                         compressionLevel);
+        const std::size_t compressedSize = ZSTD_compressCCtx(context.value,
+                                                             output.data(),
+                                                             output.size(),
+                                                             m_buffer.data(),
+                                                             m_buffer.size(),
+                                                             compressionLevel);
         if (ZSTD_isError(compressedSize))
         {
             error = "Failed to compress OME-Zarr chunk: "

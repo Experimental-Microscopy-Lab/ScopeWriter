@@ -27,7 +27,7 @@ namespace scopewriter::internal
                     int c,
                     int z,
                     const void* data,
-                    std::size_t byteCount,
+                    std::size_t sourceStride,
                     std::string& error);
         bool flush(std::string& error);
         bool close(std::string& error);

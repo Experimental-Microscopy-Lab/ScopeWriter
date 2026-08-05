@@ -1129,6 +1129,88 @@ namespace
                 "An empty binary output was retained");
     }
 
+    void testDefaultsAndStridedFrames(const std::filesystem::path& root)
+    {
+        const std::array<std::uint8_t, 6> source{1, 2, 90, 3, 4, 91};
+        const std::vector<std::uint8_t> expected{1, 2, 3, 4};
+        for (const auto format : {scopewriter::Format::Tiff,
+                                  scopewriter::Format::OmeTiff,
+                                  scopewriter::Format::OmeZarr})
+        {
+            scopewriter::WriterSettings settings;
+            settings.format = format;
+            settings.outputPath = root / (format == scopewriter::Format::Tiff
+                                               ? "strided.tif"
+                                               : format == scopewriter::Format::OmeTiff
+                                                   ? "strided.ome.tiff"
+                                                   : "strided.ome.zarr");
+            settings.width = 2;
+            settings.height = 2;
+            settings.pixelType = scopewriter::PixelType::UInt8;
+            settings.enableCompression = false;
+
+            scopewriter::FrameMetadata metadata;
+            metadata.frameIndex = 42;
+            metadata.stride = 3;
+            metadata.exposureMs = 2.5;
+            metadata.metadata.emplace("source", "camera");
+            scopewriter::Writer writer;
+            require(writer.open(settings), writer.lastError());
+            require(writer.append(source.data(), source.size(), metadata), writer.lastError());
+            require(writer.close(), writer.lastError());
+
+            scopewriter::DatasetFrameLocation location;
+            location.format = format;
+            location.dataPath = format == scopewriter::Format::OmeZarr
+                ? settings.outputPath / "0"
+                : settings.outputPath;
+            scopewriter::DatasetFrame stored;
+            std::string error;
+            require(scopewriter::datasetFrame(location, stored, error), error);
+            require(stored.bytes == expected && stored.significantBits == 8,
+                    "Strided frame or default significant bits were written incorrectly");
+            if (format == scopewriter::Format::OmeTiff)
+            {
+                const std::string xml = readTiffDescription(settings.outputPath);
+                require(xml.find("ExposureTime=\"2.5\"") != std::string::npos
+                            && xml.find("<M K=\"source\">camera</M>") != std::string::npos,
+                        "Automatic OME-TIFF coordinates discarded frame metadata");
+            }
+            else if (format == scopewriter::Format::OmeZarr)
+            {
+                const std::string json = readText(
+                    settings.outputPath / "scopewriter.frames.jsonl");
+                require(json.find("\"frameIndex\":\"42\"") != std::string::npos
+                            && json.find("\"exposureTimeMs\":2.5") != std::string::npos
+                            && json.find("\"source\":\"camera\"") != std::string::npos,
+                        "Automatic OME-Zarr coordinates discarded frame metadata");
+            }
+        }
+
+        scopewriter::WriterSettings settings;
+        settings.format = scopewriter::Format::Binary;
+        settings.outputPath = root / "packed.bin";
+        settings.frameMetadataPath = root / "packed.csv";
+        settings.width = 2;
+        settings.height = 2;
+        settings.pixelType = scopewriter::PixelType::UInt8;
+        scopewriter::Writer writer;
+        require(writer.open(settings), writer.lastError());
+        require(writer.append(expected.data(), expected.size()), writer.lastError());
+        require(writer.close(), writer.lastError());
+
+        scopewriter::DatasetFrameLocation location;
+        location.format = scopewriter::Format::Binary;
+        location.dataPath = settings.outputPath;
+        location.frameMetadataPath = settings.frameMetadataPath;
+        scopewriter::DatasetFrame stored;
+        std::string error;
+        require(scopewriter::datasetFrame(location, stored, error), error);
+        require(stored.bytes == expected && stored.metadata.stride == 2
+                    && stored.significantBits == 8,
+                "Packed binary defaults were written incorrectly");
+    }
+
     void testEmptyAndPartialTiff(const std::filesystem::path& root)
     {
         scopewriter::WriterSettings settings;
@@ -1192,6 +1274,7 @@ int main(int argc, char** argv)
         testEmptyAndPartialTiff(root);
         testPlainTiff(root);
         testBinary(root);
+        testDefaultsAndStridedFrames(root);
         if (!preserveOutput)
         {
             std::filesystem::remove_all(root);

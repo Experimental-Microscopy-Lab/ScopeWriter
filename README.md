@@ -16,7 +16,9 @@ The project is under active development and its API may change before 1.0.
 | Binary | Raw frames with a CSV index | None |
 
 Unsigned 8-bit and 16-bit frames, TCZP coordinates, physical metadata and
-unbounded time series are supported.
+unbounded time series are supported. Input rows may be tightly packed or use a
+larger byte stride. A zero stride means tightly packed rows, and zero
+`significantBits` uses the full width of the selected pixel type.
 
 ## Build
 

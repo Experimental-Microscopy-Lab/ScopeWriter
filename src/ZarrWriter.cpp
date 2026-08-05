@@ -449,6 +449,7 @@ namespace scopewriter::internal
                                 }
                                 continue;
                             }
+                            // Pass each completed chunk to exactly one worker
                             if (!threadPool->push(
                                     [this, shard, chunk, chunkIndex](std::string& taskError)
                                     {
@@ -629,7 +630,7 @@ namespace scopewriter::internal
                             int c,
                             int z,
                             const void* data,
-                            std::size_t byteCount,
+                            std::size_t sourceStride,
                             std::string& error)
     {
         if (!m_impl->open)
@@ -651,8 +652,27 @@ namespace scopewriter::internal
         frame.zeroFill = data == nullptr;
         if (data != nullptr)
         {
-            frame.data = m_impl->frameQueue->acquireBuffer(byteCount);
-            std::memcpy(frame.data.data(), data, byteCount);
+            const std::size_t sampleBytes = m_impl->settings.pixelType == PixelType::UInt8
+                ? 1u
+                : 2u;
+            const std::size_t rowBytes = static_cast<std::size_t>(m_impl->settings.width)
+                * sampleBytes;
+            frame.data = m_impl->frameQueue->acquireBuffer(
+                rowBytes * static_cast<std::size_t>(m_impl->settings.height));
+            if (sourceStride == rowBytes)
+            {
+                std::memcpy(frame.data.data(), data, frame.data.size());
+            }
+            else
+            {
+                const auto* source = static_cast<const std::uint8_t*>(data);
+                for (int row = 0; row < m_impl->settings.height; ++row)
+                {
+                    std::memcpy(frame.data.data() + static_cast<std::size_t>(row) * rowBytes,
+                                source + static_cast<std::size_t>(row) * sourceStride,
+                                rowBytes);
+                }
+            }
         }
 
         if (!m_impl->frameQueue->push(std::move(frame)))

@@ -20,7 +20,6 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <map>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -207,6 +206,19 @@ namespace scopewriter
         std::size_t bytesPerPixel(PixelType type)
         {
             return type == PixelType::UInt8 ? 1u : 2u;
+        }
+
+        // Return the packed byte width of one row
+        std::size_t packedRowBytes(const WriterSettings& settings)
+        {
+            return static_cast<std::size_t>(settings.width) * bytesPerPixel(settings.pixelType);
+        }
+
+        // Resolve the optional source row stride
+        std::size_t frameStride(const WriterSettings& settings,
+                                const FrameMetadata& metadata)
+        {
+            return metadata.stride == 0 ? packedRowBytes(settings) : metadata.stride;
         }
 
         int storageBits(PixelType type)
@@ -548,6 +560,26 @@ namespace scopewriter
             return true;
         }
 
+        // Validate the shared frame memory layout
+        bool validFrameLayout(const WriterSettings& settings,
+                              const void* data,
+                              std::size_t byteCount,
+                              const FrameMetadata& metadata,
+                              std::string& error)
+        {
+            const std::size_t rowBytes = packedRowBytes(settings);
+            const std::size_t stride = frameStride(settings, metadata);
+            const std::size_t height = static_cast<std::size_t>(settings.height);
+            if (data == nullptr || stride < rowBytes
+                || stride > (std::numeric_limits<std::size_t>::max)() / height
+                || byteCount != stride * height)
+            {
+                error = "Frame payload does not match its stride and dimensions";
+                return false;
+            }
+            return true;
+        }
+
         // Validate frame coordinates and metadata
         bool validFrame(const WriterSettings& settings,
                         const void* data,
@@ -555,19 +587,8 @@ namespace scopewriter
                         const FrameMetadata& metadata,
                         std::string& error)
         {
-            const auto width = static_cast<std::size_t>(settings.width);
-            const auto height = static_cast<std::size_t>(settings.height);
-            const std::size_t sampleBytes = bytesPerPixel(settings.pixelType);
-            if (width > (std::numeric_limits<std::size_t>::max)() / height
-                || width * height > (std::numeric_limits<std::size_t>::max)() / sampleBytes)
+            if (!validFrameLayout(settings, data, byteCount, metadata, error))
             {
-                error = "Image dimensions exceed the supported frame size";
-                return false;
-            }
-            const std::size_t expected = width * height * sampleBytes;
-            if (data == nullptr || byteCount != expected)
-            {
-                error = "Frame byte count does not match the configured image";
                 return false;
             }
             if (metadata.positionIndex < 0 || metadata.positionIndex >= settings.positionCount
@@ -640,12 +661,18 @@ namespace scopewriter
         bool writeTiffStrips(TIFF* tiff,
                              const WriterSettings& settings,
                              const void* data,
+                             const FrameMetadata& metadata,
                              std::string& error)
         {
-            const std::size_t rowBytes = static_cast<std::size_t>(settings.width)
-                * bytesPerPixel(settings.pixelType);
+            const std::size_t rowBytes = packedRowBytes(settings);
+            const std::size_t sourceStride = frameStride(settings, metadata);
             const std::size_t rowsPerStrip = tiffRowsPerStrip(settings);
             const auto* bytes = static_cast<const std::uint8_t*>(data);
+            std::vector<std::uint8_t> packedStrip;
+            if (sourceStride != rowBytes)
+            {
+                packedStrip.resize(rowsPerStrip * rowBytes);
+            }
             tstrip_t strip = 0;
             for (std::size_t row = 0; row < static_cast<std::size_t>(settings.height);
                  row += rowsPerStrip, ++strip)
@@ -653,34 +680,25 @@ namespace scopewriter
                 const std::size_t rows = (std::min)(
                     rowsPerStrip,
                     static_cast<std::size_t>(settings.height) - row);
+                const std::uint8_t* stripData = bytes + row * sourceStride;
+                if (!packedStrip.empty())
+                {
+                    for (std::size_t stripRow = 0; stripRow < rows; ++stripRow)
+                    {
+                        std::memcpy(packedStrip.data() + stripRow * rowBytes,
+                                    stripData + stripRow * sourceStride,
+                                    rowBytes);
+                    }
+                    stripData = packedStrip.data();
+                }
                 if (TIFFWriteEncodedStrip(tiff,
                                           strip,
-                                          const_cast<std::uint8_t*>(bytes + row * rowBytes),
+                                          const_cast<std::uint8_t*>(stripData),
                                           static_cast<tmsize_t>(rows * rowBytes)) == -1)
                 {
                     error = "Failed to write a TIFF strip";
                     return false;
                 }
-            }
-            return true;
-        }
-
-        // Validate binary frame layout before writing
-        bool validBinaryFrame(const WriterSettings& settings,
-                              const void* data,
-                              std::size_t byteCount,
-                              const FrameMetadata& metadata,
-                              std::string& error)
-        {
-            const std::size_t packedRowBytes = static_cast<std::size_t>(settings.width)
-                * bytesPerPixel(settings.pixelType);
-            if (data == nullptr || byteCount == 0 || metadata.stride < packedRowBytes
-                || metadata.stride > (std::numeric_limits<std::size_t>::max)()
-                    / static_cast<std::size_t>(settings.height)
-                || byteCount != metadata.stride * static_cast<std::size_t>(settings.height))
-            {
-                error = "Binary frame payload does not match its stride and dimensions";
-                return false;
             }
             return true;
         }
@@ -1092,7 +1110,7 @@ namespace scopewriter
                 TIFFCreateDirectory(m_tiff);
                 const std::string descriptionText = description.str();
                 configureTiffDirectory(m_tiff, m_settings, descriptionText.c_str());
-                if (!writeTiffStrips(m_tiff, m_settings, data, error)
+                if (!writeTiffStrips(m_tiff, m_settings, data, metadata, error)
                     || !TIFFWriteDirectory(m_tiff))
                 {
                     if (error.empty()) error = "Failed to write the TIFF frame";
@@ -1231,15 +1249,16 @@ namespace scopewriter
                     error = "Binary output is not open";
                     return false;
                 }
-                if (!validBinaryFrame(m_settings, data, byteCount, metadata, error))
+                if (!validFrameLayout(m_settings, data, byteCount, metadata, error))
                 {
                     return false;
                 }
+                const std::size_t stride = frameStride(m_settings, metadata);
                 m_raw.write(static_cast<const char*>(data), static_cast<std::streamsize>(byteCount));
                 m_metadata << csvField(metadata.cameraId) << ','
                     << metadata.frameIndex << ',' << metadata.timestampNs << ','
                     << m_settings.width << ',' << m_settings.height << ','
-                    << m_settings.significantBits << ',' << metadata.stride << ','
+                    << m_settings.significantBits << ',' << stride << ','
                     << pixelFormatName(m_settings.pixelType) << ','
                     << pixelFormatId(m_settings.pixelType) << ','
                     << byteCount << ',' << metadata.sourceRoiX << ',' << metadata.sourceRoiY << ','
@@ -1441,9 +1460,11 @@ namespace scopewriter
                         error = "OME-TIFF contains all configured frames";
                         return false;
                     }
-                    metadata = coordinatesForSequenceIndex(m_settings,
-                                                           nextPlaneIndex,
-                                                           metadata.positionIndex);
+                    const FrameMetadata coordinates = coordinatesForSequenceIndex(
+                        m_settings, nextPlaneIndex, metadata.positionIndex);
+                    metadata.t = coordinates.t;
+                    metadata.c = coordinates.c;
+                    metadata.z = coordinates.z;
                 }
                 std::int64_t planeIndex = 0;
                 if (!sequenceIndex(m_settings, metadata, planeIndex))
@@ -1460,13 +1481,13 @@ namespace scopewriter
                 {
                     const FrameMetadata fill = coordinatesForSequenceIndex(
                         m_settings, nextPlaneIndex, metadata.positionIndex);
-                    if (!enqueuePlane(nullptr, 0, fill, error))
+                    if (!enqueuePlane(nullptr, fill, error))
                     {
                         return false;
                     }
                     ++nextPlaneIndex;
                 }
-                if (!enqueuePlane(data, byteCount, metadata, error))
+                if (!enqueuePlane(data, metadata, error))
                 {
                     return false;
                 }
@@ -1699,7 +1720,6 @@ namespace scopewriter
             }
 
             bool enqueuePlane(const void* data,
-                              std::size_t byteCount,
                               const FrameMetadata& metadata,
                               std::string& error)
             {
@@ -1716,8 +1736,24 @@ namespace scopewriter
                             m_freeFrames.pop_back();
                         }
                     }
-                    job.frame.resize(byteCount);
-                    std::memcpy(job.frame.data(), data, byteCount);
+                    const std::size_t rowBytes = packedRowBytes(m_settings);
+                    const std::size_t sourceStride = frameStride(m_settings, metadata);
+                    job.frame.resize(rowBytes * static_cast<std::size_t>(m_settings.height));
+                    if (sourceStride == rowBytes)
+                    {
+                        std::memcpy(job.frame.data(), data, job.frame.size());
+                    }
+                    else
+                    {
+                        const auto* source = static_cast<const std::uint8_t*>(data);
+                        for (int row = 0; row < m_settings.height; ++row)
+                        {
+                            std::memcpy(job.frame.data() + static_cast<std::size_t>(row) * rowBytes,
+                                        source + static_cast<std::size_t>(row) * sourceStride,
+                                        rowBytes);
+                        }
+                    }
+                    job.metadata.stride = rowBytes;
                 }
 
                 std::unique_lock lock(m_queueMutex);
@@ -1820,7 +1856,7 @@ namespace scopewriter
                     configureTiffDirectory(tiff, m_settings, nullptr);
                 }
 
-                if (!writeTiffStrips(tiff, m_settings, data, error)
+                if (!writeTiffStrips(tiff, m_settings, data, metadata, error)
                     || !TIFFWriteDirectory(tiff))
                 {
                     series.planes.pop_back();
@@ -1898,6 +1934,7 @@ namespace scopewriter
 
                 m_settings = settings;
                 m_series.clear();
+                m_series.reserve(static_cast<std::size_t>(settings.positionCount));
                 m_framesWritten = 0;
                 std::vector<std::string> seriesMetadata;
                 std::vector<std::string> seriesNames;
@@ -1910,7 +1947,7 @@ namespace scopewriter
                     series.groupName = seriesName(settings, position);
                     seriesNames.push_back(series.groupName);
                     seriesMetadata.push_back(globalMetadata(series));
-                    m_series.emplace(position, std::move(series));
+                    m_series.push_back(std::move(series));
                 }
 
                 if (!m_writer.open(settings, seriesNames, seriesMetadata, error))
@@ -1919,9 +1956,8 @@ namespace scopewriter
                     return false;
                 }
 
-                for (auto& [position, series] : m_series)
+                for (auto& series : m_series)
                 {
-                    static_cast<void>(position);
                     const auto groupPath = series.groupName.empty()
                                                ? settings.outputPath
                                                : settings.outputPath / series.groupName;
@@ -1959,13 +1995,8 @@ namespace scopewriter
                 {
                     return false;
                 }
-                auto seriesIterator = m_series.find(suppliedMetadata.positionIndex);
-                if (seriesIterator == m_series.end())
-                {
-                    error = "OME-Zarr position index is invalid";
-                    return false;
-                }
-                auto& series = seriesIterator->second;
+                auto& series = m_series[
+                    static_cast<std::size_t>(suppliedMetadata.positionIndex)];
                 FrameMetadata metadata = suppliedMetadata;
                 if (metadata.t < 0)
                 {
@@ -1976,9 +2007,11 @@ namespace scopewriter
                         error = "OME-Zarr contains all configured frames";
                         return false;
                     }
-                    metadata = coordinatesForSequenceIndex(m_settings,
-                                                           series.nextPlaneIndex,
-                                                           metadata.positionIndex);
+                    const FrameMetadata coordinates = coordinatesForSequenceIndex(
+                        m_settings, series.nextPlaneIndex, metadata.positionIndex);
+                    metadata.t = coordinates.t;
+                    metadata.c = coordinates.c;
+                    metadata.z = coordinates.z;
                 }
                 std::int64_t planeIndex = 0;
                 if (!sequenceIndex(m_settings, metadata, planeIndex))
@@ -1995,12 +2028,12 @@ namespace scopewriter
                 {
                     const FrameMetadata fill = coordinatesForSequenceIndex(
                         m_settings, series.nextPlaneIndex, series.positionIndex);
-                    if (!appendPlane(series, nullptr, byteCount, fill, error))
+                    if (!appendPlane(series, nullptr, fill, error))
                     {
                         return false;
                     }
                 }
-                if (!appendPlane(series, data, byteCount, metadata, error))
+                if (!appendPlane(series, data, metadata, error))
                 {
                     return false;
                 }
@@ -2021,9 +2054,8 @@ namespace scopewriter
                     error = "OME-Zarr output is not open";
                     return false;
                 }
-                for (auto& [position, series] : m_series)
+                for (auto& series : m_series)
                 {
-                    static_cast<void>(position);
                     series.frameMetadata.flush();
                     if (!series.frameMetadata)
                     {
@@ -2041,9 +2073,8 @@ namespace scopewriter
                     return true;
                 }
                 bool success = true;
-                for (auto& [position, series] : m_series)
+                for (auto& series : m_series)
                 {
-                    static_cast<void>(position);
                     series.frameMetadata.flush();
                     if (!series.frameMetadata)
                     {
@@ -2074,7 +2105,6 @@ namespace scopewriter
         private:
             bool appendPlane(Series& series,
                              const void* data,
-                             std::size_t byteCount,
                              const FrameMetadata& metadata,
                              std::string& error)
             {
@@ -2083,7 +2113,7 @@ namespace scopewriter
                                      metadata.c,
                                      metadata.z,
                                      data,
-                                     byteCount,
+                                     frameStride(m_settings, metadata),
                                      error))
                 {
                     return false;
@@ -2233,9 +2263,8 @@ namespace scopewriter
 
             void cleanupFailedOpen()
             {
-                for (auto& [position, series] : m_series)
+                for (auto& series : m_series)
                 {
-                    static_cast<void>(position);
                     series.frameMetadata.close();
                 }
                 m_series.clear();
@@ -2248,7 +2277,7 @@ namespace scopewriter
 
             WriterSettings m_settings;
             internal::ZarrWriter m_writer;
-            std::map<int, Series> m_series;
+            std::vector<Series> m_series;
             std::int64_t m_framesWritten{0};
             bool m_open{false};
         };
@@ -2288,6 +2317,10 @@ namespace scopewriter
         }
         m_impl->error.clear();
         WriterSettings settings = suppliedSettings;
+        if (settings.significantBits == 0)
+        {
+            settings.significantBits = storageBits(settings.pixelType);
+        }
         if (!validSettings(settings, m_impl->error))
         {
             return false;

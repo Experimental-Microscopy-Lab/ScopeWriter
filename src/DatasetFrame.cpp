@@ -360,7 +360,7 @@ namespace scopewriter
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLEFORMAT, &sampleFormat);
             if (width == 0 || height == 0 || samples != 1
                 || planar != PLANARCONFIG_CONTIG || sampleFormat != SAMPLEFORMAT_UINT
-                || bits == 0 || bits > 16
+                || (bits != 8 && bits != 16)
                 || width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
                 || height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
             {
@@ -565,7 +565,16 @@ namespace scopewriter
                     error = "Binary frame pixel format is unsupported";
                     return false;
                 }
-                if (frame.width <= 0 || frame.height <= 0 || frame.metadata.stride == 0
+                const std::size_t sampleBytes = frame.pixelType == PixelType::UInt8 ? 1u : 2u;
+                const int storageBits = frame.pixelType == PixelType::UInt8 ? 8 : 16;
+                if (frame.width <= 0 || frame.height <= 0
+                    || frame.significantBits <= 0 || frame.significantBits > storageBits)
+                {
+                    error = "Binary frame layout is invalid";
+                    return false;
+                }
+                const std::size_t rowBytes = static_cast<std::size_t>(frame.width) * sampleBytes;
+                if (frame.metadata.stride < rowBytes
                     || frame.metadata.stride
                         > (std::numeric_limits<std::size_t>::max)()
                             / static_cast<std::size_t>(frame.height)

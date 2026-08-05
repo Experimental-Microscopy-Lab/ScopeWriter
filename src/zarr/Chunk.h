@@ -1,10 +1,8 @@
 // Derived from acquire-zarr 0.8.1 chunk interfaces
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -30,7 +28,6 @@ namespace scopewriter::internal::zarr
     private:
         std::size_t m_bytesPerSample;
         std::vector<std::uint8_t> m_buffer;
-        std::mutex m_mutex;
-        std::atomic<bool> m_hasData{false};
+        bool m_hasData{false};
     };
 }
