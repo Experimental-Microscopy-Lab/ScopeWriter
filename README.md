@@ -1,5 +1,9 @@
 # ScopeWriter
 
+<p align="center">
+  <img src="resources/ScopeWriter_Icon.svg" alt="ScopeWriter logo" width="180">
+</p>
+
 [![Compile Check](https://github.com/Experimental-Microscopy-Lab/ScopeWriter/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/Experimental-Microscopy-Lab/ScopeWriter/actions/workflows/windows-ci.yml)
 
 ScopeWriter is a C++ library for writing microscopy image streams.
