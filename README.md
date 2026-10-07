@@ -23,10 +23,10 @@ zero `significantBits` uses the pixel type width.
 
 ## Build
 
-Requires CMake 3.23 or newer and a C++20 compiler. Dependencies are bundled.
+Requires CMake 3.23 or newer and a C++20 compiler. libtiff, zlib, Zstandard, and CRC32C are declared in `vcpkg.json` and installed by vcpkg when the vcpkg toolchain is used.
 
 ```powershell
-cmake -S . -B build
+cmake -S . -B build "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 cmake --install build --config Release --prefix install
@@ -34,7 +34,7 @@ cmake --install build --config Release --prefix install
 
 ## Use
 
-From source:
+From source (the parent project must provide the same dependencies, for example by listing them in its own `vcpkg.json`):
 
 ```cmake
 add_subdirectory(ScopeWriter)

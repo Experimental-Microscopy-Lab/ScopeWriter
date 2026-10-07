@@ -1,13 +1,12 @@
 # Third-party notices
 
+ScopeWriter links libtiff, zlib, Zstandard, and CRC32C, which are provided by
+vcpkg (see `vcpkg.json`) under their own licenses.
+
 ScopeWriter includes the following third-party code under its original terms:
 
 | Component | License file |
 | --- | --- |
-| libtiff | `third_party/libtiff/LICENSE.md` |
-| zlib | `third_party/zlib/LICENSE` |
-| Zstandard | `third_party/zstd/LICENSE` |
-| CRC32C | `third_party/crc32c/LICENSE` |
 | acquire-zarr | Full text below |
 
 Parts of `src/zarr` and `src/ZarrWriter.cpp` are derived from acquire-zarr and
