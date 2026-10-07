@@ -19,7 +19,10 @@ add_subdirectory(
         EXCLUDE_FROM_ALL
 )
 unset(SKIP_INSTALL_ALL)
-add_library(ZLIB::ZLIB ALIAS zlibstatic)
+# A parent project may already provide ZLIB::ZLIB (e.g. via a static Qt build).
+if (NOT TARGET ZLIB::ZLIB)
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+endif ()
 
 set(CRC32C_BUILD_TESTS OFF)
 set(CRC32C_BUILD_BENCHMARKS OFF)
