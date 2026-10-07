@@ -1,5 +1,6 @@
 {
   "name": "scopewriter",
+  "version": "0.2.0",
   "builtin-baseline": "434307da09bc05b2c86996dccc8b2351fc0d5d37",
   "dependencies": [
     "crc32c",

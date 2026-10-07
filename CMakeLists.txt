@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 
-project(ScopeWriter VERSION 0.1.0 LANGUAGES C CXX)
+project(ScopeWriter VERSION 0.2.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -49,7 +49,7 @@ set_target_properties(ScopeWriter PROPERTIES
 )
 
 target_compile_features(ScopeWriter PUBLIC cxx_std_20)
-target_compile_definitions(ScopeWriter PRIVATE SCOPEWRITER_EXPORTS)
+target_compile_definitions(ScopeWriter PRIVATE SCOPEWRITER_EXPORTS SCOPEWRITER_VERSION_STRING="${PROJECT_VERSION}")
 
 target_include_directories(ScopeWriter
         PUBLIC
