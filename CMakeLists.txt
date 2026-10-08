@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 
-project(ScopeWriter VERSION 0.1.0 LANGUAGES C CXX)
+project(ScopeWriter VERSION 0.2.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -8,73 +8,14 @@ include(CMakePackageConfigHelpers)
 option(SCOPEWRITER_BUILD_TESTS "Build ScopeWriter tests" ${PROJECT_IS_TOP_LEVEL})
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
-set(_scopewriter_third_party_dir "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
-
-set(ZLIB_BUILD_EXAMPLES OFF)
-set(SKIP_INSTALL_ALL ON)
-add_subdirectory(
-        "${_scopewriter_third_party_dir}/zlib"
-        "${CMAKE_CURRENT_BINARY_DIR}/third_party/zlib"
-        EXCLUDE_FROM_ALL
-)
-unset(SKIP_INSTALL_ALL)
-# A parent project may already provide ZLIB::ZLIB (e.g. via a static Qt build).
-if (NOT TARGET ZLIB::ZLIB)
-    add_library(ZLIB::ZLIB ALIAS zlibstatic)
-endif ()
-
-set(CRC32C_BUILD_TESTS OFF)
-set(CRC32C_BUILD_BENCHMARKS OFF)
-set(CRC32C_USE_GLOG OFF)
-set(CRC32C_INSTALL OFF)
-add_subdirectory(
-        "${_scopewriter_third_party_dir}/crc32c"
-        "${CMAKE_CURRENT_BINARY_DIR}/third_party/crc32c"
-        EXCLUDE_FROM_ALL
-)
-add_library(Crc32c::crc32c ALIAS crc32c)
-
-set(ZSTD_BUILD_PROGRAMS OFF)
-set(ZSTD_BUILD_SHARED OFF)
-set(ZSTD_BUILD_STATIC ON)
-set(ZSTD_BUILD_TESTS OFF)
-set(ZSTD_BUILD_CONTRIB OFF)
-set(ZSTD_LEGACY_SUPPORT OFF)
-set(ZSTD_MULTITHREAD_SUPPORT OFF)
-add_subdirectory(
-        "${_scopewriter_third_party_dir}/zstd/build/cmake"
-        "${CMAKE_CURRENT_BINARY_DIR}/third_party/zstd"
-        EXCLUDE_FROM_ALL
-)
-
-set(tiff-static ON)
-set(tiff-tools OFF)
-set(tiff-tests OFF)
-set(tiff-contrib OFF)
-set(tiff-docs OFF)
-set(tiff-install OFF)
-set(tiff-cxx OFF)
-set(zlib ON)
-set(libdeflate OFF)
-set(jpeg OFF)
-set(old-jpeg OFF)
-set(jpeg12 OFF)
-set(jbig OFF)
-set(lerc OFF)
-set(lzma OFF)
-set(zstd OFF)
-set(webp OFF)
-add_subdirectory(
-        "${_scopewriter_third_party_dir}/libtiff"
-        "${CMAKE_CURRENT_BINARY_DIR}/third_party/libtiff"
-        EXCLUDE_FROM_ALL
-)
-
+find_package(ZLIB REQUIRED)
+find_package(zstd CONFIG REQUIRED)
+find_package(TIFF REQUIRED)
+find_package(Crc32c CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 set(_scopewriter_zarr_libraries
         Crc32c::crc32c
-        libzstd_static
+        zstd::libzstd
         Threads::Threads
 )
 
@@ -108,7 +49,7 @@ set_target_properties(ScopeWriter PROPERTIES
 )
 
 target_compile_features(ScopeWriter PUBLIC cxx_std_20)
-target_compile_definitions(ScopeWriter PRIVATE SCOPEWRITER_EXPORTS)
+target_compile_definitions(ScopeWriter PRIVATE SCOPEWRITER_EXPORTS SCOPEWRITER_VERSION_STRING="${PROJECT_VERSION}")
 
 target_include_directories(ScopeWriter
         PUBLIC
@@ -116,7 +57,7 @@ target_include_directories(ScopeWriter
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-target_link_libraries(ScopeWriter PRIVATE TIFF::tiff ZLIB::ZLIB)
+target_link_libraries(ScopeWriter PRIVATE TIFF::TIFF ZLIB::ZLIB)
 target_link_libraries(ScopeWriter PRIVATE ${_scopewriter_zarr_libraries})
 
 if (MSVC)
@@ -136,7 +77,7 @@ if (SCOPEWRITER_BUILD_TESTS)
     target_compile_features(ScopeWriterTests PRIVATE cxx_std_20)
     target_link_libraries(ScopeWriterTests PRIVATE
             ScopeWriter
-            TIFF::tiff
+            TIFF::TIFF
             ${_scopewriter_zarr_libraries}
     )
     add_test(NAME ScopeWriterTests COMMAND ScopeWriterTests)
@@ -163,18 +104,6 @@ install(TARGETS ScopeWriter
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(FILES README.md LICENSE THIRD_PARTY_NOTICES.md
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/ScopeWriter"
-)
-install(FILES third_party/libtiff/LICENSE.md
-        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/ScopeWriter/licenses/libtiff"
-)
-install(FILES third_party/zlib/LICENSE
-        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/ScopeWriter/licenses/zlib"
-)
-install(FILES third_party/zstd/LICENSE
-        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/ScopeWriter/licenses/zstd"
-)
-install(FILES third_party/crc32c/LICENSE
-        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/ScopeWriter/licenses/crc32c"
 )
 install(EXPORT ScopeWriterTargets
         FILE ScopeWriterTargets.cmake

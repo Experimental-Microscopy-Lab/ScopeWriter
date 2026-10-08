@@ -30,6 +30,11 @@
 namespace scopewriter
 {
     // Return the bundled libtiff version
+    std::string version()
+    {
+        return SCOPEWRITER_VERSION_STRING;
+    }
+
     std::string libTiffVersion()
     {
         std::string version = TIFFGetVersion();

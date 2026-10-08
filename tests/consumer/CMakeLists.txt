@@ -22,3 +22,9 @@ add_test(NAME ScopeWriterInstalledConsumer
         COMMAND ScopeWriterConsumer
                 "${CMAKE_CURRENT_BINARY_DIR}/consumer.ome.tiff"
 )
+if (WIN32)
+    # Dependency DLLs are installed next to ScopeWriter.dll
+    set_tests_properties(ScopeWriterInstalledConsumer PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:ScopeWriter::ScopeWriter>"
+    )
+endif ()
