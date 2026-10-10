@@ -110,6 +110,9 @@ namespace scopewriter
         int zarrChunkHeight{512};
         int zarrShardWidthChunks{0};
         int zarrShardHeightChunks{0};
+        // OME-Zarr resolution levels. 1 writes the full resolution only, 0 halves the image
+        // until it fits in one chunk, and other values write at most that many levels (up to 16)
+        int zarrPyramidLevels{1};
         unsigned int zarrWorkerCount{0};
         std::size_t zarrMaxQueuedFrameBytes{0};
     };

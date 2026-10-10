@@ -544,6 +544,12 @@ namespace scopewriter
                 return false;
             }
             if (settings.format == Format::OmeZarr
+                && (settings.zarrPyramidLevels < 0 || settings.zarrPyramidLevels > 16))
+            {
+                error = "OME-Zarr pyramid level count must be between 0 and 16";
+                return false;
+            }
+            if (settings.format == Format::OmeZarr
                 && settings.zarrMaxQueuedFrameBytes > 0
                 && settings.zarrMaxQueuedFrameBytes < frameBytes)
             {

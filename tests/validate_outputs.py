@@ -87,12 +87,11 @@ def validate_ome_zarr_image(path, group, pixels=None):
         return None
     multiscale = image.attributes.ome.multiscales[0]
     names = [axis.name for axis in multiscale.axes]
-    array = None
     for dataset in multiscale.datasets:
         array = group[dataset.path]
         if list(array.metadata.dimension_names or []) != names:
             fail(path, f"dimension_names {array.metadata.dimension_names} != axes {names}")
-    data = array[...]
+    data = group[multiscale.datasets[0].path][...]
     if pixels is not None:
         check_pixels(path, pixels,
                      {name.upper(): size for name, size in zip(names, data.shape)},
@@ -153,6 +152,53 @@ def check_pixel_type_outputs(root):
                 fail(stem, f"{label} pixels differ from the binary frames")
 
 
+def mean_down(plane):
+    """Average 2x2 blocks of the last two axes. Odd edges average what they have."""
+    height, width = plane.shape[-2:]
+    rows = np.arange(0, height, 2)
+    columns = np.arange(0, width, 2)
+    sums = np.add.reduceat(
+        np.add.reduceat(plane.astype(np.float64), rows, axis=-2), columns, axis=-1)
+    counts = (np.add.reduceat(np.ones(height), rows)[:, None]
+              * np.add.reduceat(np.ones(width), columns)[None, :])
+    mean = sums / counts
+    if np.issubdtype(plane.dtype, np.integer):
+        return np.floor(mean + 0.5).astype(plane.dtype)
+    return mean.astype(plane.dtype)
+
+
+def check_pyramids(root):
+    """Every coarser level must be the 2x2 mean of the level before it."""
+    global checked
+    for path in sorted(root.glob("pyramid-*.ome.zarr")):
+        checked += 1
+        group = zarr.open_group(path, mode="r")
+        multiscale = group.attrs["ome"]["multiscales"][0]
+        datasets = multiscale["datasets"]
+        if len(datasets) < 2:
+            fail(path, "expected a multi-resolution image")
+            continue
+        levels = [group[dataset["path"]][...] for dataset in datasets]
+        for index in range(1, len(levels)):
+            expected = mean_down(levels[index - 1])
+            actual = levels[index]
+            if actual.shape != expected.shape:
+                fail(path, f"level {index} has shape {actual.shape}, expected {expected.shape}")
+                continue
+            if np.issubdtype(actual.dtype, np.integer):
+                same = np.array_equal(actual, expected)
+            else:
+                same = np.allclose(actual, expected, rtol=1e-6)
+            if not same:
+                fail(path, f"level {index} is not the mean of level {index - 1}")
+            first = datasets[0]["coordinateTransformations"][0]["scale"]
+            scale = datasets[index]["coordinateTransformations"][0]["scale"]
+            factor = 2 ** index
+            if scale[:3] != first[:3] or scale[3] != first[3] * factor \
+                    or scale[4] != first[4] * factor:
+                fail(path, f"level {index} scale {scale} is not {factor}x the first level")
+
+
 def main():
     global checked
     root = Path(sys.argv[1])
@@ -164,6 +210,7 @@ def main():
             checked += 1
             validate_ome_zarr(path)
     check_pixel_type_outputs(root)
+    check_pyramids(root)
     for message in failures:
         print("FAIL", message)
     print(f"{checked} outputs checked, {len(failures)} problems")

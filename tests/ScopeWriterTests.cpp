@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -1211,24 +1212,60 @@ namespace
                 "Packed binary defaults were written incorrectly");
     }
 
+    struct PixelCase
+    {
+        scopewriter::PixelType type;
+        std::size_t bytes;
+        const char* name;
+    };
+
+    const std::array<PixelCase, 8> kPixelCases{{
+        {scopewriter::PixelType::UInt8, 1, "uint8"},
+        {scopewriter::PixelType::UInt16, 2, "uint16"},
+        {scopewriter::PixelType::UInt32, 4, "uint32"},
+        {scopewriter::PixelType::Int8, 1, "int8"},
+        {scopewriter::PixelType::Int16, 2, "int16"},
+        {scopewriter::PixelType::Int32, 4, "int32"},
+        {scopewriter::PixelType::Float32, 4, "float32"},
+        {scopewriter::PixelType::Float64, 8, "float64"}
+    }};
+
+    // Fill a frame with reproducible samples. Integers use any bit pattern and
+    // floating point values stay finite.
+    void fillFrame(const PixelCase& type,
+                   std::vector<std::uint8_t>& frame,
+                   std::uint32_t& seed)
+    {
+        const auto next = [&seed]
+        {
+            seed = seed * 1664525u + 1013904223u;
+            return seed;
+        };
+        for (std::size_t offset = 0; offset < frame.size(); offset += type.bytes)
+        {
+            std::uint8_t* target = frame.data() + offset;
+            if (type.type == scopewriter::PixelType::Float32)
+            {
+                const float value = static_cast<float>(next() >> 8) / 65536.0f - 128.0f;
+                std::memcpy(target, &value, sizeof(value));
+            }
+            else if (type.type == scopewriter::PixelType::Float64)
+            {
+                const double value = static_cast<double>(next() >> 8) / 65536.0 - 128.0;
+                std::memcpy(target, &value, sizeof(value));
+            }
+            else
+            {
+                for (std::size_t byte = 0; byte < type.bytes; ++byte)
+                {
+                    target[byte] = static_cast<std::uint8_t>(next() >> 24);
+                }
+            }
+        }
+    }
+
     void testPixelTypes(const std::filesystem::path& root)
     {
-        struct Case
-        {
-            scopewriter::PixelType type;
-            std::size_t bytes;
-            const char* name;
-        };
-        const std::array<Case, 8> types{{
-            {scopewriter::PixelType::UInt8, 1, "uint8"},
-            {scopewriter::PixelType::UInt16, 2, "uint16"},
-            {scopewriter::PixelType::UInt32, 4, "uint32"},
-            {scopewriter::PixelType::Int8, 1, "int8"},
-            {scopewriter::PixelType::Int16, 2, "int16"},
-            {scopewriter::PixelType::Int32, 4, "int32"},
-            {scopewriter::PixelType::Float32, 4, "float32"},
-            {scopewriter::PixelType::Float64, 8, "float64"}
-        }};
         const std::array<scopewriter::Format, 4> formats{
             scopewriter::Format::OmeTiff,
             scopewriter::Format::OmeZarr,
@@ -1240,17 +1277,13 @@ namespace
         constexpr int frameCount = 2;
 
         std::uint32_t seed = 12345;
-        for (const auto& type : types)
+        for (const auto& type : kPixelCases)
         {
             std::vector<std::vector<std::uint8_t>> frames(frameCount);
             for (auto& frame : frames)
             {
                 frame.resize(static_cast<std::size_t>(width) * height * type.bytes);
-                for (auto& byte : frame)
-                {
-                    seed = seed * 1664525u + 1013904223u;
-                    byte = static_cast<std::uint8_t>(seed >> 24);
-                }
+                fillFrame(type, frame, seed);
             }
 
             for (const auto format : formats)
@@ -1307,6 +1340,146 @@ namespace
                                 && stored.significantBits == static_cast<int>(type.bytes * 8)
                                 && stored.bytes == frames[static_cast<std::size_t>(index)],
                             std::string(type.name) + " frame did not survive a round trip");
+                }
+            }
+        }
+    }
+
+    void testPyramids(const std::filesystem::path& root)
+    {
+        struct Geometry
+        {
+            int width;
+            int height;
+            int levels;
+            std::vector<std::pair<int, int>> sizes;
+        };
+        // Odd sizes make the last row and column average fewer pixels
+        const std::array<Geometry, 2> geometries{{
+            {11, 9, 3, {{11, 9}, {6, 5}, {3, 3}}},
+            {37, 21, 0, {{37, 21}, {19, 11}, {10, 6}, {5, 3}}}
+        }};
+        constexpr int frameCount = 2;
+
+        std::uint32_t seed = 777;
+        for (const auto& type : kPixelCases)
+        {
+            for (std::size_t index = 0; index < geometries.size(); ++index)
+            {
+                const auto& geometry = geometries[index];
+                // The automatic case is limited to one pixel type to keep the test short
+                if (index == 1 && type.type != scopewriter::PixelType::UInt16)
+                {
+                    continue;
+                }
+                std::vector<std::vector<std::uint8_t>> frames(frameCount);
+                for (auto& frame : frames)
+                {
+                    frame.resize(static_cast<std::size_t>(geometry.width) * geometry.height
+                                 * type.bytes);
+                    fillFrame(type, frame, seed);
+                }
+
+                scopewriter::WriterSettings settings;
+                settings.format = scopewriter::Format::OmeZarr;
+                settings.outputPath = root / ((index == 0 ? "pyramid-" : "pyramid-auto-")
+                                              + std::string(type.name) + ".ome.zarr");
+                settings.width = geometry.width;
+                settings.height = geometry.height;
+                settings.pixelType = type.type;
+                settings.timeCount = frameCount;
+                settings.zarrChunkWidth = index == 0 ? 4 : 8;
+                settings.zarrChunkHeight = index == 0 ? 4 : 8;
+                settings.zarrPyramidLevels = geometry.levels;
+                settings.physicalSizeXUm = 0.5;
+                settings.physicalSizeYUm = 0.25;
+
+                scopewriter::Writer writer;
+                require(writer.open(settings), writer.lastError());
+                for (const auto& frame : frames)
+                {
+                    require(writer.append(frame.data(), frame.size()), writer.lastError());
+                }
+                require(writer.close(), writer.lastError());
+
+                const std::string group = readText(settings.outputPath / "zarr.json");
+                for (std::size_t level = 0; level < geometry.sizes.size(); ++level)
+                {
+                    require(group.find("\"path\":\"" + std::to_string(level) + "\"")
+                                != std::string::npos,
+                            std::string(type.name) + " pyramid level is missing from the metadata");
+                }
+                require(group.find("\"path\":\"" + std::to_string(geometry.sizes.size()) + "\"")
+                            == std::string::npos,
+                        std::string(type.name) + " pyramid has more levels than expected");
+
+                for (std::size_t level = 0; level < geometry.sizes.size(); ++level)
+                {
+                    scopewriter::DatasetFrameLocation location;
+                    location.format = scopewriter::Format::OmeZarr;
+                    location.dataPath = settings.outputPath / std::to_string(level);
+                    location.t = 1;
+                    scopewriter::DatasetFrame stored;
+                    std::string error;
+                    require(scopewriter::datasetFrame(location, stored, error),
+                            std::string(type.name) + " level " + std::to_string(level) + ": " + error);
+                    require(stored.width == geometry.sizes[level].first
+                                && stored.height == geometry.sizes[level].second
+                                && stored.pixelType == type.type,
+                            std::string(type.name) + " pyramid level has the wrong geometry");
+                    if (level == 0)
+                    {
+                        require(stored.bytes == frames[1],
+                                std::string(type.name) + " full resolution changed by the pyramid");
+                    }
+                }
+
+                // Check the averaging itself for one type in this test. The other types are
+                // compared against NumPy by the format validation.
+                if (type.type == scopewriter::PixelType::UInt16)
+                {
+                    scopewriter::DatasetFrameLocation fineLocation;
+                    fineLocation.format = scopewriter::Format::OmeZarr;
+                    fineLocation.dataPath = settings.outputPath / "0";
+                    fineLocation.t = 1;
+                    scopewriter::DatasetFrameLocation coarseLocation = fineLocation;
+                    coarseLocation.dataPath = settings.outputPath / "1";
+                    scopewriter::DatasetFrame fine;
+                    scopewriter::DatasetFrame coarse;
+                    std::string error;
+                    require(scopewriter::datasetFrame(fineLocation, fine, error), error);
+                    require(scopewriter::datasetFrame(coarseLocation, coarse, error), error);
+                    for (int y = 0; y < coarse.height; ++y)
+                    {
+                        for (int x = 0; x < coarse.width; ++x)
+                        {
+                            double sum = 0.0;
+                            int count = 0;
+                            for (int row = 2 * y; row < (std::min)(2 * y + 2, fine.height); ++row)
+                            {
+                                for (int column = 2 * x; column < (std::min)(2 * x + 2, fine.width);
+                                     ++column)
+                                {
+                                    std::uint16_t sample = 0;
+                                    std::memcpy(&sample,
+                                                fine.bytes.data()
+                                                    + (static_cast<std::size_t>(row) * fine.width
+                                                       + static_cast<std::size_t>(column)) * 2,
+                                                2);
+                                    sum += sample;
+                                    ++count;
+                                }
+                            }
+                            std::uint16_t stored = 0;
+                            std::memcpy(&stored,
+                                        coarse.bytes.data()
+                                            + (static_cast<std::size_t>(y) * coarse.width
+                                               + static_cast<std::size_t>(x)) * 2,
+                                        2);
+                            require(stored == static_cast<std::uint16_t>(std::floor(sum / count + 0.5)),
+                                    "Pyramid pixel is not the mean of its source block");
+                        }
+                    }
                 }
             }
         }
@@ -1377,6 +1550,7 @@ int main(int argc, char** argv)
         testBinary(root);
         testDefaultsAndStridedFrames(root);
         testPixelTypes(root);
+        testPyramids(root);
         if (!preserveOutput)
         {
             std::filesystem::remove_all(root);

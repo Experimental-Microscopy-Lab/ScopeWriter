@@ -29,6 +29,12 @@ little endian.
 | `Int8`, `Int16`, `Int32` | `int8`, `int16`, `int32` | same | signed integer |
 | `Float32`, `Float64` | `float`, `double` | `float32`, `float64` | IEEE floating point |
 
+OME-Zarr can store a resolution pyramid, which viewers such as napari and Neuroglancer use to
+show large images quickly. Set `zarrPyramidLevels` to the number of levels, or to 0 to halve the
+image until it fits in one chunk. Each level halves X and Y by averaging 2x2 blocks (integers
+round half up) and is listed in `multiscales` with the scale of its level. The default of 1
+writes the full resolution only.
+
 Multi-position OME-Zarr follows the `bioformats2raw.layout` container: one group per
 position and an `OME` group that lists the series and holds `METADATA.ome.xml`.
 

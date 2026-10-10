@@ -4,6 +4,7 @@
 #include "PixelTypes.h"
 #include "ZarrWriter.h"
 #include "zarr/Chunk.h"
+#include "zarr/Downsample.h"
 #include "zarr/FileHandle.h"
 #include "zarr/FrameQueue.h"
 #include "zarr/Shard.h"
@@ -44,6 +45,48 @@ namespace scopewriter::internal
         int chunkCount(int extent, int chunkExtent)
         {
             return (extent + chunkExtent - 1) / chunkExtent;
+        }
+
+        // Geometry of every resolution level, from the full resolution down. Each
+        // level halves X and Y, rounding up, and stops at a single pixel.
+        std::vector<WriterSettings> pyramidLevels(const WriterSettings& settings)
+        {
+            constexpr std::size_t maxLevels = 16;
+            std::vector<WriterSettings> levels{settings};
+            const auto wantsAnotherLevel = [&settings, &levels]()
+            {
+                const WriterSettings& last = levels.back();
+                if (last.width == 1 && last.height == 1)
+                {
+                    return false;
+                }
+                return settings.zarrPyramidLevels == 0
+                    ? last.width > settings.zarrChunkWidth || last.height > settings.zarrChunkHeight
+                    : levels.size() < static_cast<std::size_t>(settings.zarrPyramidLevels);
+            };
+            while (levels.size() < maxLevels && wantsAnotherLevel())
+            {
+                WriterSettings next = levels.back();
+                next.width = (next.width + 1) / 2;
+                next.height = (next.height + 1) / 2;
+                levels.push_back(std::move(next));
+            }
+            return levels;
+        }
+
+        std::string imageName(const WriterSettings& settings, int positionIndex)
+        {
+            if (settings.positionCount == 1)
+            {
+                return settings.imageName;
+            }
+            const PositionMetadata* position = settings.positions.empty()
+                ? nullptr
+                : &settings.positions[static_cast<std::size_t>(positionIndex)];
+            return settings.imageName + ' '
+                + (position != nullptr && !position->name.empty()
+                       ? position->name
+                       : "Position " + std::to_string(positionIndex + 1));
         }
 
         int shardChunkCount(int totalChunks, int configuredChunks)
@@ -173,8 +216,8 @@ namespace scopewriter::internal
                  << "    \"scopewriter\": " << customMetadata << ",\n"
                  << "    \"ome\": {\n"
                  << "      \"version\": \"0.5\",\n"
-                 << "      \"name\": \"/\",\n"
                  << "      \"multiscales\": [{\n"
+                 << "        \"name\": " << jsonEscape(imageName(settings, positionIndex)) << ",\n"
                  << "        \"axes\": [";
 
             const auto axis = [&json](const char* name, const char* type, const char* unit)
@@ -197,29 +240,46 @@ namespace scopewriter::internal
             json << ',';
             axis("x", "space", settings.physicalSizeXUm > 0.0 ? "micrometer" : nullptr);
 
-            json << "],\n"
-                 << "        \"datasets\": [{\"path\":\"0\","
-                 << "\"coordinateTransformations\":[{\"type\":\"scale\",\"scale\":["
-                 << (settings.timeIncrementMs > 0.0 ? number(settings.timeIncrementMs) : "1")
-                 << ",1,"
-                 << (settings.physicalSizeZUm > 0.0 ? number(settings.physicalSizeZUm) : "1")
-                 << ','
-                 << (settings.physicalSizeYUm > 0.0 ? number(settings.physicalSizeYUm) : "1")
-                 << ','
-                 << (settings.physicalSizeXUm > 0.0 ? number(settings.physicalSizeXUm) : "1")
-                 << "]}";
-            if (!settings.positions.empty())
+            const std::size_t levelCount = pyramidLevels(settings).size();
+            json << "],\n";
+            if (levelCount > 1)
             {
-                const auto& position = settings.positions[static_cast<std::size_t>(positionIndex)];
-                if (position.xUm || position.yUm || position.zUm)
-                {
-                    json << ",{" << "\"type\":\"translation\",\"translation\":[0,0,"
-                         << (position.zUm ? number(*position.zUm) : "0") << ','
-                         << (position.yUm ? number(*position.yUm) : "0") << ','
-                         << (position.xUm ? number(*position.xUm) : "0") << "]}";
-                }
+                json << "        \"type\": \"mean\",\n";
             }
-            json << "]}]}],\n"
+            json << "        \"datasets\": [";
+            for (std::size_t level = 0; level < levelCount; ++level)
+            {
+                // Each level is twice as coarse as the one before it in X and Y. Without a
+                // physical size the scale is the factor to the first level.
+                const double factor = static_cast<double>(std::uint64_t{1} << level);
+                if (level != 0)
+                    json << ',';
+                json << "{\"path\":\"" << level << "\","
+                     << "\"coordinateTransformations\":[{\"type\":\"scale\",\"scale\":["
+                     << (settings.timeIncrementMs > 0.0 ? number(settings.timeIncrementMs) : "1")
+                     << ",1,"
+                     << (settings.physicalSizeZUm > 0.0 ? number(settings.physicalSizeZUm) : "1")
+                     << ','
+                     << number((settings.physicalSizeYUm > 0.0 ? settings.physicalSizeYUm : 1.0)
+                               * factor)
+                     << ','
+                     << number((settings.physicalSizeXUm > 0.0 ? settings.physicalSizeXUm : 1.0)
+                               * factor)
+                     << "]}";
+                if (!settings.positions.empty())
+                {
+                    const auto& position = settings.positions[static_cast<std::size_t>(positionIndex)];
+                    if (position.xUm || position.yUm || position.zUm)
+                    {
+                        json << ",{" << "\"type\":\"translation\",\"translation\":[0,0,"
+                             << (position.zUm ? number(*position.zUm) : "0") << ','
+                             << (position.yUm ? number(*position.yUm) : "0") << ','
+                             << (position.xUm ? number(*position.xUm) : "0") << "]}";
+                    }
+                }
+                json << "]}";
+            }
+            json << "]}],\n"
                  << "      \"omero\": {\"channels\":[";
             // The display window spans the integer range of the significant bits.
             // Floating point data has no fixed range, so it carries no window.
@@ -384,11 +444,48 @@ namespace scopewriter::internal
                                    groupMetadata(settings,
                                                  seriesMetadata[static_cast<std::size_t>(position)],
                                                  position),
-                                   error)
-                    || !writeTextFile(groupPath / "0" / "zarr.json",
-                                      arrayMetadata(settings,
-                                                    sizeT[static_cast<std::size_t>(position)]),
-                                      error))
+                                   error))
+                {
+                    return false;
+                }
+                for (std::size_t level = 0; level < levels.size(); ++level)
+                {
+                    if (!writeTextFile(groupPath / std::to_string(level) / "zarr.json",
+                                       arrayMetadata(levels[level],
+                                                     sizeT[static_cast<std::size_t>(position)]),
+                                       error))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Write the full resolution plane and every coarser level derived from it
+        bool processFrame(zarr::FrameQueue::Frame& frame, std::string& error)
+        {
+            const std::uint8_t* source = frame.data.data();
+            std::vector<std::uint8_t> coarser;
+            for (std::size_t level = 0; level < levels.size(); ++level)
+            {
+                if (level != 0 && !frame.zeroFill)
+                {
+                    const WriterSettings& finer = levels[level - 1];
+                    const WriterSettings& current = levels[level];
+                    std::vector<std::uint8_t> plane(
+                        static_cast<std::size_t>(current.width)
+                        * static_cast<std::size_t>(current.height)
+                        * pixelTypeInfo(settings.pixelType).bytes);
+                    zarr::downsample2x(settings.pixelType,
+                                       source,
+                                       finer.width,
+                                       finer.height,
+                                       plane.data());
+                    coarser = std::move(plane);
+                    source = coarser.data();
+                }
+                if (!processLevel(frame, level, levels[level], source, error))
                 {
                     return false;
                 }
@@ -396,13 +493,17 @@ namespace scopewriter::internal
             return true;
         }
 
-        // Split one frame into chunks and shards
-        bool processFrame(zarr::FrameQueue::Frame& frame, std::string& error)
+        // Split one plane of a resolution level into chunks and shards
+        bool processLevel(zarr::FrameQueue::Frame& frame,
+                          std::size_t level,
+                          const WriterSettings& levelSettings,
+                          const std::uint8_t* source,
+                          std::string& error)
         {
-            const int chunkWidthValue = chunkWidth(settings);
-            const int chunkHeightValue = chunkHeight(settings);
-            const int chunksX = chunkCount(settings.width, chunkWidthValue);
-            const int chunksY = chunkCount(settings.height, chunkHeightValue);
+            const int chunkWidthValue = chunkWidth(levelSettings);
+            const int chunkHeightValue = chunkHeight(levelSettings);
+            const int chunksX = chunkCount(levelSettings.width, chunkWidthValue);
+            const int chunksY = chunkCount(levelSettings.height, chunkHeightValue);
             const int shardChunksX = shardChunkCount(chunksX,
                                                      settings.zarrShardWidthChunks);
             const int shardChunksY = shardChunkCount(chunksY,
@@ -410,9 +511,8 @@ namespace scopewriter::internal
             const int shardsX = chunkCount(chunksX, shardChunksX);
             const int shardsY = chunkCount(chunksY, shardChunksY);
             const std::size_t sampleBytes = pixelTypeInfo(settings.pixelType).bytes;
-            const std::size_t sourceStride = static_cast<std::size_t>(settings.width)
+            const std::size_t sourceStride = static_cast<std::size_t>(levelSettings.width)
                 * sampleBytes;
-            const auto* source = frame.data.data();
             const std::size_t chunkBytes = static_cast<std::size_t>(chunkWidthValue)
                 * static_cast<std::size_t>(chunkHeightValue) * sampleBytes;
             const std::size_t chunksPerShard = static_cast<std::size_t>(shardChunksX)
@@ -421,7 +521,7 @@ namespace scopewriter::internal
             {
                 for (int shardX = 0; shardX < shardsX; ++shardX)
                 {
-                    const std::filesystem::path shardPath = frame.groupPath / "0" / "c"
+                    const std::filesystem::path shardPath = frame.groupPath / std::to_string(level) / "c"
                         / std::to_string(frame.t) / std::to_string(frame.c)
                         / std::to_string(frame.z) / std::to_string(shardY)
                         / std::to_string(shardX);
@@ -449,9 +549,9 @@ namespace scopewriter::internal
                             const int sourceX = chunkX * chunkWidthValue;
                             const int sourceY = chunkY * chunkHeightValue;
                             const int copyWidth = (std::min)(chunkWidthValue,
-                                                            settings.width - sourceX);
+                                                            levelSettings.width - sourceX);
                             const int copyHeight = (std::min)(chunkHeightValue,
-                                                             settings.height - sourceY);
+                                                             levelSettings.height - sourceY);
                             auto chunk = std::make_shared<zarr::Chunk>(chunkBytes,
                                                                       sampleBytes);
                             chunk->writeRows(
@@ -531,6 +631,7 @@ namespace scopewriter::internal
         std::vector<std::string> seriesNames;
         std::vector<std::string> seriesMetadata;
         std::vector<std::int64_t> sizeT;
+        std::vector<WriterSettings> levels;
         std::shared_ptr<zarr::FileHandlePool> handlePool;
         std::unique_ptr<zarr::FrameQueue> frameQueue;
         std::unique_ptr<zarr::ThreadPool> threadPool;
@@ -573,6 +674,7 @@ namespace scopewriter::internal
         m_impl->seriesNames = seriesNames;
         m_impl->seriesMetadata = seriesMetadata;
         m_impl->sizeT.assign(static_cast<std::size_t>(settings.positionCount), 0);
+        m_impl->levels = pyramidLevels(settings);
         {
             std::lock_guard lock(m_impl->stateMutex);
             m_impl->workerError.clear();

@@ -26,6 +26,8 @@ add_library(ScopeWriter SHARED
         src/ZarrWriter.h
         src/zarr/Chunk.cpp
         src/zarr/Chunk.h
+        src/zarr/Downsample.cpp
+        src/zarr/Downsample.h
         src/zarr/FileHandle.cpp
         src/zarr/FileHandle.h
         src/zarr/FileSink.cpp
