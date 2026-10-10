@@ -2,6 +2,8 @@
 
 #include "scopewriter/ScopeWriter.h"
 
+#include "PixelTypes.h"
+
 #include <crc32c/crc32c.h>
 #include <tiffio.h>
 #include <zstd.h>
@@ -358,9 +360,9 @@ namespace scopewriter
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, &samples);
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PLANARCONFIG, &planar);
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLEFORMAT, &sampleFormat);
+            const internal::PixelTypeInfo* pixelInfo = internal::findTiffType(bits, sampleFormat);
             if (width == 0 || height == 0 || samples != 1
-                || planar != PLANARCONFIG_CONTIG || sampleFormat != SAMPLEFORMAT_UINT
-                || (bits != 8 && bits != 16)
+                || planar != PLANARCONFIG_CONTIG || pixelInfo == nullptr
                 || width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
                 || height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
             {
@@ -370,10 +372,10 @@ namespace scopewriter
 
             frame.width = static_cast<int>(width);
             frame.height = static_cast<int>(height);
-            frame.pixelType = bits <= 8 ? PixelType::UInt8 : PixelType::UInt16;
-            const int storageBits = bits <= 8 ? 8 : 16;
+            frame.pixelType = pixelInfo->type;
+            const int storageBits = bits;
             frame.significantBits = storageBits;
-            const std::size_t sampleBytes = frame.pixelType == PixelType::UInt8 ? 1u : 2u;
+            const std::size_t sampleBytes = pixelInfo->bytes;
             const std::size_t stride = static_cast<std::size_t>(width) * sampleBytes;
             if (stride > (std::numeric_limits<std::size_t>::max)() / height)
             {
@@ -552,21 +554,17 @@ namespace scopewriter
                     return false;
                 }
                 frame.metadata.cameraId = fields[0];
-                if (pixelFormatId == 0 && fields[7] == "Mono8")
-                {
-                    frame.pixelType = PixelType::UInt8;
-                }
-                else if (pixelFormatId == 1 && fields[7] == "Mono16")
-                {
-                    frame.pixelType = PixelType::UInt16;
-                }
-                else
+                const internal::PixelTypeInfo* pixelInfo = pixelFormatId < 0
+                    ? nullptr
+                    : internal::findBinaryType(static_cast<unsigned int>(pixelFormatId), fields[7]);
+                if (pixelInfo == nullptr)
                 {
                     error = "Binary frame pixel format is unsupported";
                     return false;
                 }
-                const std::size_t sampleBytes = frame.pixelType == PixelType::UInt8 ? 1u : 2u;
-                const int storageBits = frame.pixelType == PixelType::UInt8 ? 8 : 16;
+                frame.pixelType = pixelInfo->type;
+                const std::size_t sampleBytes = pixelInfo->bytes;
+                const int storageBits = static_cast<int>(sampleBytes * 8);
                 if (frame.width <= 0 || frame.height <= 0
                     || frame.significantBits <= 0 || frame.significantBits > storageBits)
                 {
@@ -637,21 +635,14 @@ namespace scopewriter
                 error = "OME-Zarr array metadata is unsupported";
                 return false;
             }
-            if (dataType == "uint8")
-            {
-                frame.pixelType = PixelType::UInt8;
-                frame.significantBits = 8;
-            }
-            else if (dataType == "uint16")
-            {
-                frame.pixelType = PixelType::UInt16;
-                frame.significantBits = 16;
-            }
-            else
+            const internal::PixelTypeInfo* pixelInfo = internal::findZarrType(dataType);
+            if (pixelInfo == nullptr)
             {
                 error = "OME-Zarr pixel type is unsupported";
                 return false;
             }
+            frame.pixelType = pixelInfo->type;
+            frame.significantBits = static_cast<int>(pixelInfo->bytes * 8);
             std::string groupMetadata;
             if (!readText(location.dataPath.parent_path() / "zarr.json",
                           groupMetadata,
@@ -685,7 +676,7 @@ namespace scopewriter
 
             frame.width = static_cast<int>(shape[4]);
             frame.height = static_cast<int>(shape[3]);
-            const std::size_t sampleBytes = frame.pixelType == PixelType::UInt8 ? 1u : 2u;
+            const std::size_t sampleBytes = pixelInfo->bytes;
             const std::size_t stride = static_cast<std::size_t>(frame.width) * sampleBytes;
             if (stride > (std::numeric_limits<std::size_t>::max)()
                              / static_cast<std::size_t>(frame.height))

@@ -2,6 +2,7 @@
 
 #include "scopewriter/ScopeWriter.h"
 
+#include "PixelTypes.h"
 #include "ZarrWriter.h"
 
 #include <tiffio.h>
@@ -210,7 +211,7 @@ namespace scopewriter
 
         std::size_t bytesPerPixel(PixelType type)
         {
-            return type == PixelType::UInt8 ? 1u : 2u;
+            return internal::pixelTypeInfo(type).bytes;
         }
 
         // Return the packed byte width of one row
@@ -228,17 +229,17 @@ namespace scopewriter
 
         int storageBits(PixelType type)
         {
-            return type == PixelType::UInt8 ? 8 : 16;
+            return static_cast<int>(bytesPerPixel(type) * 8);
         }
 
         const char* pixelFormatName(PixelType type)
         {
-            return type == PixelType::UInt8 ? "Mono8" : "Mono16";
+            return internal::pixelTypeInfo(type).binaryName;
         }
 
         unsigned int pixelFormatId(PixelType type)
         {
-            return type == PixelType::UInt8 ? 0u : 1u;
+            return internal::pixelTypeInfo(type).binaryId;
         }
 
         int axisCount(const WriterSettings& settings, char axis)
@@ -641,7 +642,8 @@ namespace scopewriter
             TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, settings.height);
             TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, storageBits(settings.pixelType));
             TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, 1);
-            TIFFSetField(tiff, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_UINT);
+            const auto& pixelInfo = internal::pixelTypeInfo(settings.pixelType);
+            TIFFSetField(tiff, TIFFTAG_SAMPLEFORMAT, internal::tiffSampleFormat(pixelInfo.kind));
             TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
             TIFFSetField(tiff, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
             TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
@@ -654,7 +656,11 @@ namespace scopewriter
             {
                 TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_ADOBE_DEFLATE);
                 TIFFSetField(tiff, TIFFTAG_ZIPQUALITY, settings.compressionLevel);
-                TIFFSetField(tiff, TIFFTAG_PREDICTOR, PREDICTOR_HORIZONTAL);
+                TIFFSetField(tiff,
+                             TIFFTAG_PREDICTOR,
+                             pixelInfo.kind == internal::SampleKind::Float
+                                 ? PREDICTOR_FLOATINGPOINT
+                                 : PREDICTOR_HORIZONTAL);
             }
             else
             {
@@ -722,10 +728,12 @@ namespace scopewriter
             const std::vector<Plane>* planes{nullptr};
         };
 
-        // Build OME XML for the current set of planes
+        // Build OME XML for the current set of planes. A metadata-only document
+        // describes data stored elsewhere, as OME-Zarr does.
         std::string buildOmeXml(const WriterSettings& settings,
                                 const std::vector<TiffFileMetadata>& files,
-                                const std::string& rootUuid)
+                                const std::string& rootUuid,
+                                bool metadataOnly = false)
         {
             struct Series
             {
@@ -743,7 +751,7 @@ namespace scopewriter
                 Series current;
                 current.position = file.position;
                 current.sizeZ = settings.zCount;
-                current.sizeT = settings.timeCount > 0 ? settings.timeCount : 1;
+                current.sizeT = !metadataOnly && settings.timeCount > 0 ? settings.timeCount : 1;
                 current.file = &file;
                 if (file.planes != nullptr)
                 {
@@ -770,8 +778,12 @@ namespace scopewriter
                 << "<OME xmlns=\"http://www.openmicroscopy.org/Schemas/OME/2016-06\""
                 << " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
                 << " xsi:schemaLocation=\"http://www.openmicroscopy.org/Schemas/OME/2016-06 http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd\""
-                << " Creator=\"" << xmlEscape(settings.creator) << "\""
-                << " UUID=\"" << xmlEscape(rootUuid) << "\">\n";
+                << " Creator=\"" << xmlEscape(settings.creator) << "\"";
+            if (!rootUuid.empty())
+            {
+                xml << " UUID=\"" << xmlEscape(rootUuid) << "\"";
+            }
+            xml << ">\n";
 
             if (hasDetector)
             {
@@ -835,7 +847,7 @@ namespace scopewriter
 
                 xml << "    <Pixels ID=\"Pixels:" << current.position
                     << "\" DimensionOrder=\"XYZCT\" Type=\""
-                    << (settings.pixelType == PixelType::UInt8 ? "uint8" : "uint16")
+                    << internal::pixelTypeInfo(settings.pixelType).ome
                     << "\" SizeX=\"" << settings.width
                     << "\" SizeY=\"" << settings.height
                     << "\" SizeZ=\"" << current.sizeZ
@@ -854,7 +866,12 @@ namespace scopewriter
                 if (settings.timeIncrementMs > 0.0)
                     xml << " TimeIncrement=\"" << number(settings.timeIncrementMs)
                         << "\" TimeIncrementUnit=\"ms\"";
-                xml << " SignificantBits=\"" << settings.significantBits << "\">\n";
+                if (internal::pixelTypeInfo(settings.pixelType).kind
+                    != internal::SampleKind::Float)
+                {
+                    xml << " SignificantBits=\"" << settings.significantBits << "\"";
+                }
+                xml << ">\n";
                 for (int channelIndex = 0; channelIndex < settings.channelCount; ++channelIndex)
                 {
                     const ChannelMetadata* channel = settings.channels.empty()
@@ -885,7 +902,12 @@ namespace scopewriter
                     xml << " SamplesPerPixel=\"1\"/>\n";
                 }
 
-                for (const Plane* plane : current.planes)
+                static const std::vector<const Plane*> noPlanes;
+                if (metadataOnly)
+                {
+                    xml << "      <MetadataOnly/>\n";
+                }
+                for (const Plane* plane : metadataOnly ? noPlanes : current.planes)
                 {
                     xml << "      <TiffData IFD=\"" << plane->ifd
                         << "\" FirstZ=\"" << plane->metadata.z
@@ -1900,6 +1922,7 @@ namespace scopewriter
                 std::string groupName;
                 std::ofstream frameMetadata;
                 std::int64_t nextPlaneIndex{0};
+                std::vector<Plane> planes;
             };
 
         public:
@@ -2042,6 +2065,7 @@ namespace scopewriter
                 {
                     return false;
                 }
+                series.planes.push_back(Plane{static_cast<int>(series.planes.size()), metadata});
                 series.frameMetadata << frameMetadataJson(metadata) << '\n';
                 if (!series.frameMetadata)
                 {
@@ -2068,7 +2092,7 @@ namespace scopewriter
                         return false;
                     }
                 }
-                return m_writer.flush(error);
+                return m_writer.flush(error) && writeOmeXml(error);
             }
 
             bool close(std::string& error) override
@@ -2097,6 +2121,10 @@ namespace scopewriter
                     }
                     success = false;
                 }
+                if (success && !writeOmeXml(error))
+                {
+                    success = false;
+                }
                 m_series.clear();
                 m_open = false;
                 return success;
@@ -2108,6 +2136,47 @@ namespace scopewriter
             }
 
         private:
+            // The OME group of a multi-series container carries the OME-XML
+            // that describes every series
+            bool writeOmeXml(std::string& error) const
+            {
+                if (m_settings.positionCount <= 1)
+                {
+                    return true;
+                }
+                std::vector<TiffFileMetadata> files;
+                files.reserve(m_series.size());
+                for (const auto& series : m_series)
+                {
+                    files.push_back(TiffFileMetadata{series.positionIndex, {}, {}, &series.planes});
+                }
+                const std::string xml = buildOmeXml(m_settings, files, m_settings.uuid, true);
+                const auto directory = m_settings.outputPath / "OME";
+                const auto target = directory / "METADATA.ome.xml";
+                auto temporary = target;
+                temporary += ".tmp";
+                std::error_code filesystemError;
+                std::filesystem::create_directories(directory, filesystemError);
+                {
+                    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+                    output.write(xml.data(), static_cast<std::streamsize>(xml.size()));
+                    output.close();
+                    if (filesystemError || !output)
+                    {
+                        error = "Failed to write the OME-Zarr OME-XML metadata";
+                        return false;
+                    }
+                }
+                std::filesystem::rename(temporary, target, filesystemError);
+                if (filesystemError)
+                {
+                    std::filesystem::remove(temporary, filesystemError);
+                    error = "Failed to replace the OME-Zarr OME-XML metadata";
+                    return false;
+                }
+                return true;
+            }
+
             bool appendPlane(Series& series,
                              const void* data,
                              const FrameMetadata& metadata,
