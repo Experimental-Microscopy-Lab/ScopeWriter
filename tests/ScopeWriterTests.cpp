@@ -1211,6 +1211,107 @@ namespace
                 "Packed binary defaults were written incorrectly");
     }
 
+    void testPixelTypes(const std::filesystem::path& root)
+    {
+        struct Case
+        {
+            scopewriter::PixelType type;
+            std::size_t bytes;
+            const char* name;
+        };
+        const std::array<Case, 8> types{{
+            {scopewriter::PixelType::UInt8, 1, "uint8"},
+            {scopewriter::PixelType::UInt16, 2, "uint16"},
+            {scopewriter::PixelType::UInt32, 4, "uint32"},
+            {scopewriter::PixelType::Int8, 1, "int8"},
+            {scopewriter::PixelType::Int16, 2, "int16"},
+            {scopewriter::PixelType::Int32, 4, "int32"},
+            {scopewriter::PixelType::Float32, 4, "float32"},
+            {scopewriter::PixelType::Float64, 8, "float64"}
+        }};
+        const std::array<scopewriter::Format, 4> formats{
+            scopewriter::Format::OmeTiff,
+            scopewriter::Format::OmeZarr,
+            scopewriter::Format::Tiff,
+            scopewriter::Format::Binary
+        };
+        constexpr int width = 5;
+        constexpr int height = 3;
+        constexpr int frameCount = 2;
+
+        std::uint32_t seed = 12345;
+        for (const auto& type : types)
+        {
+            std::vector<std::vector<std::uint8_t>> frames(frameCount);
+            for (auto& frame : frames)
+            {
+                frame.resize(static_cast<std::size_t>(width) * height * type.bytes);
+                for (auto& byte : frame)
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    byte = static_cast<std::uint8_t>(seed >> 24);
+                }
+            }
+
+            for (const auto format : formats)
+            {
+                scopewriter::WriterSettings settings;
+                settings.format = format;
+                settings.width = width;
+                settings.height = height;
+                settings.pixelType = type.type;
+                settings.timeCount = frameCount;
+                const std::string stem = std::string("types-") + type.name;
+                switch (format)
+                {
+                case scopewriter::Format::OmeTiff:
+                    settings.outputPath = root / (stem + ".ome.tiff");
+                    break;
+                case scopewriter::Format::OmeZarr:
+                    settings.outputPath = root / (stem + ".ome.zarr");
+                    break;
+                case scopewriter::Format::Tiff:
+                    settings.outputPath = root / (stem + ".tif");
+                    break;
+                case scopewriter::Format::Binary:
+                    settings.outputPath = root / (stem + ".bin");
+                    settings.frameMetadataPath = root / (stem + ".csv");
+                    break;
+                }
+
+                scopewriter::Writer writer;
+                require(writer.open(settings), std::string(type.name) + ": " + writer.lastError());
+                for (const auto& frame : frames)
+                {
+                    require(writer.append(frame.data(), frame.size()),
+                            std::string(type.name) + ": " + writer.lastError());
+                }
+                require(writer.close(), std::string(type.name) + ": " + writer.lastError());
+
+                for (int index = 0; index < frameCount; ++index)
+                {
+                    scopewriter::DatasetFrameLocation location;
+                    location.format = format;
+                    location.dataPath = format == scopewriter::Format::OmeZarr
+                        ? settings.outputPath / "0"
+                        : settings.outputPath;
+                    location.frameMetadataPath = settings.frameMetadataPath;
+                    location.frameIndex = static_cast<std::uint64_t>(index);
+                    location.t = index;
+                    scopewriter::DatasetFrame stored;
+                    std::string error;
+                    require(scopewriter::datasetFrame(location, stored, error),
+                            std::string(type.name) + ": " + error);
+                    require(stored.pixelType == type.type && stored.width == width
+                                && stored.height == height
+                                && stored.significantBits == static_cast<int>(type.bytes * 8)
+                                && stored.bytes == frames[static_cast<std::size_t>(index)],
+                            std::string(type.name) + " frame did not survive a round trip");
+                }
+            }
+        }
+    }
+
     void testEmptyAndPartialTiff(const std::filesystem::path& root)
     {
         scopewriter::WriterSettings settings;
@@ -1275,6 +1376,7 @@ int main(int argc, char** argv)
         testPlainTiff(root);
         testBinary(root);
         testDefaultsAndStridedFrames(root);
+        testPixelTypes(root);
         if (!preserveOutput)
         {
             std::filesystem::remove_all(root);

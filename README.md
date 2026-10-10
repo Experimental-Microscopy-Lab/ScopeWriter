@@ -17,9 +17,33 @@ ScopeWriter is a C++ library for writing microscopy image streams.
 | TIFF | Multi-page BigTIFF with per-frame JSON metadata | Deflate or none |
 | Binary | Raw frames with a CSV index | None |
 
-Supports unsigned 8-bit and 16-bit frames, TCZP coordinates, physical metadata,
-unbounded time series and row strides. A zero stride means tightly packed rows;
-zero `significantBits` uses the pixel type width.
+Supports monochrome frames of `UInt8`, `UInt16`, `UInt32`, `Int8`, `Int16`, `Int32`,
+`Float32` and `Float64`, TCZP coordinates, physical metadata, unbounded time series
+and row strides. A zero stride means tightly packed rows; zero `significantBits` uses
+the pixel type width. Frames are written in the byte order of the host, which must be
+little endian.
+
+| Pixel type | OME-XML | Zarr V3 | TIFF |
+| --- | --- | --- | --- |
+| `UInt8`, `UInt16`, `UInt32` | `uint8`, `uint16`, `uint32` | same | unsigned integer |
+| `Int8`, `Int16`, `Int32` | `int8`, `int16`, `int32` | same | signed integer |
+| `Float32`, `Float64` | `float`, `double` | `float32`, `float64` | IEEE floating point |
+
+Multi-position OME-Zarr follows the `bioformats2raw.layout` container: one group per
+position and an `OME` group that lists the series and holds `METADATA.ome.xml`.
+
+## Validation
+
+`tests/validate_outputs.py` checks the files written by `ScopeWriterTests` with
+independent readers: OME-XML against the OME schema with `ome-types`, OME-Zarr against the
+OME-NGFF 0.5 models of `ome-zarr-models`, and the pixels of every format with `tifffile`
+and `zarr`. CI runs it on every change.
+
+```bash
+build/ScopeWriterTests outputs
+pip install -r tests/requirements.txt
+python tests/validate_outputs.py outputs
+```
 
 ## Build
 

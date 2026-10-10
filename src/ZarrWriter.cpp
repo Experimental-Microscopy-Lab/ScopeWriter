@@ -1,6 +1,7 @@
 // Portions of this implementation are derived from acquire-zarr 0.8.1
 // This file was modified for ScopeWriter's filesystem-only OME-Zarr backend
 
+#include "PixelTypes.h"
 #include "ZarrWriter.h"
 #include "zarr/Chunk.h"
 #include "zarr/FileHandle.h"
@@ -220,7 +221,24 @@ namespace scopewriter::internal
             }
             json << "]}]}],\n"
                  << "      \"omero\": {\"channels\":[";
-            const std::uint64_t windowEnd = (std::uint64_t{1} << settings.significantBits) - 1;
+            // The display window spans the integer range of the significant bits.
+            // Floating point data has no fixed range, so it carries no window.
+            const PixelTypeInfo& pixelInfo = pixelTypeInfo(settings.pixelType);
+            std::string window;
+            if (pixelInfo.kind == SampleKind::Unsigned)
+            {
+                const std::string end = std::to_string(
+                    (std::uint64_t{1} << settings.significantBits) - 1);
+                window = "{\"start\":0,\"end\":" + end + ",\"min\":0,\"max\":" + end + "}";
+            }
+            else if (pixelInfo.kind == SampleKind::Signed)
+            {
+                const std::int64_t high = (std::int64_t{1} << (settings.significantBits - 1)) - 1;
+                const std::string start = std::to_string(-high - 1);
+                const std::string end = std::to_string(high);
+                window = "{\"start\":" + start + ",\"end\":" + end
+                    + ",\"min\":" + start + ",\"max\":" + end + "}";
+            }
             for (int channelIndex = 0; channelIndex < settings.channelCount; ++channelIndex)
             {
                 if (channelIndex != 0)
@@ -234,9 +252,12 @@ namespace scopewriter::internal
                 json << "{\"label\":" << jsonEscape(label)
                      << ",\"color\":" << jsonEscape(channel != nullptr && channel->colorRGB
                                                            ? rgbHex(*channel->colorRGB)
-                                                           : "FFFFFF")
-                     << ",\"window\":{\"start\":0,\"end\":" << windowEnd
-                     << ",\"min\":0,\"max\":" << windowEnd << "}}";
+                                                           : "FFFFFF");
+                if (!window.empty())
+                {
+                    json << ",\"window\":" << window;
+                }
+                json << '}';
             }
             json << "]}\n"
                  << "    }\n"
@@ -283,7 +304,7 @@ namespace scopewriter::internal
                                                      settings.zarrShardWidthChunks);
             const int shardChunksY = shardChunkCount(chunksY,
                                                      settings.zarrShardHeightChunks);
-            const char* dataType = settings.pixelType == PixelType::UInt8 ? "uint8" : "uint16";
+            const char* dataType = pixelTypeInfo(settings.pixelType).zarr;
 
             std::ostringstream json;
             json << "{\n"
@@ -388,7 +409,7 @@ namespace scopewriter::internal
                                                      settings.zarrShardHeightChunks);
             const int shardsX = chunkCount(chunksX, shardChunksX);
             const int shardsY = chunkCount(chunksY, shardChunksY);
-            const std::size_t sampleBytes = settings.pixelType == PixelType::UInt8 ? 1u : 2u;
+            const std::size_t sampleBytes = pixelTypeInfo(settings.pixelType).bytes;
             const std::size_t sourceStride = static_cast<std::size_t>(settings.width)
                 * sampleBytes;
             const auto* source = frame.data.data();
@@ -571,7 +592,7 @@ namespace scopewriter::internal
             : settings.zarrWorkerCount;
         const std::size_t frameBytes = static_cast<std::size_t>(settings.width)
             * static_cast<std::size_t>(settings.height)
-            * (settings.pixelType == PixelType::UInt8 ? 1u : 2u);
+            * pixelTypeInfo(settings.pixelType).bytes;
         const std::size_t automaticFrameCapacity = (std::clamp)(
             static_cast<std::size_t>(workerCount) * 2,
             std::size_t{2},
@@ -652,9 +673,7 @@ namespace scopewriter::internal
         frame.zeroFill = data == nullptr;
         if (data != nullptr)
         {
-            const std::size_t sampleBytes = m_impl->settings.pixelType == PixelType::UInt8
-                ? 1u
-                : 2u;
+            const std::size_t sampleBytes = pixelTypeInfo(m_impl->settings.pixelType).bytes;
             const std::size_t rowBytes = static_cast<std::size_t>(m_impl->settings.width)
                 * sampleBytes;
             frame.data = m_impl->frameQueue->acquireBuffer(

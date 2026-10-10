@@ -31,10 +31,17 @@ namespace scopewriter
         Binary
     };
 
+    // One monochrome sample per pixel
     enum class PixelType
     {
         UInt8,
-        UInt16
+        UInt16,
+        UInt32,
+        Int8,
+        Int16,
+        Int32,
+        Float32,
+        Float64
     };
 
     struct DetectorMetadata
